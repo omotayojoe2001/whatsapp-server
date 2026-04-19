@@ -150,8 +150,8 @@ async function getOrCreateSession(userId) {
         const phone = msg.key.remoteJid.replace("@s.whatsapp.net", "");
         if (supabase) {
           try {
-            await supabase.from("wa_sequence_contacts").update({ status: "replied", replied_at: new Date().toISOString() })
-              .eq("user_id", userId).eq("phone", phone).eq("status", "active");
+            await supabase.from("wa_sequence_contacts").update({ status: "replied", has_replied: true })
+              .eq("user_id", userId).eq("contact_phone", phone).eq("status", "active");
           } catch {}
         }
       }
@@ -271,7 +271,7 @@ async function processSequences() {
           totalDelayMins += dm;
         }
 
-        const enrolled = new Date(contact.enrolled_at);
+        const enrolled = new Date(contact.created_at);
         const minsSinceEnroll = (now.getTime() - enrolled.getTime()) / 60000;
 
         // For day-based steps with specific time, check time too
@@ -291,11 +291,11 @@ async function processSequences() {
           const { data: already } = await supabase.from("wa_message_queue").select("id").eq("campaign_id", cacheKey).limit(1);
           if (already?.length) continue;
           await supabase.from("wa_message_queue").insert({
-            user_id: seq.user_id, phone: contact.phone, message: step.message,
+            user_id: seq.user_id, phone: contact.contact_phone, message: step.message,
             status: "queued", campaign_id: cacheKey, type: "sequence", scheduled_at: new Date().toISOString(),
           });
           await supabase.from("wa_sequence_contacts").update({ current_step: idx + 1, last_sent_at: now.toISOString() }).eq("id", contact.id);
-          console.log(`[Seq] Step ${idx + 1} for ${contact.phone} (${step.unit === "immediately" ? "now" : step.delay + " " + step.unit})`);
+          console.log(`[Seq] Step ${idx + 1} for ${contact.contact_phone} (${step.unit === "immediately" ? "now" : step.delay + " " + step.unit})`);
         }
       }
     }
