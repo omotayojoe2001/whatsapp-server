@@ -1,0 +1,19 @@
+{
+  "name": "gooddeeds-whatsapp-server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "whatsapp-web.js": "^1.26.1-alpha.3",
+    "express": "^4.21.0",
+    "cors": "^2.8.5",
+    "qrcode": "^1.5.4",
+    "puppeteer": "^23.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

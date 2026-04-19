@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: gooddeeds-whatsapp
+    runtime: docker
+    plan: free
+    envVars:
+      - key: WA_API_KEY
+        sync: false
+      - key: PORT
+        value: 3100
