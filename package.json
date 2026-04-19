@@ -13,9 +13,6 @@
     "qrcode": "^1.5.4",
     "pino": "^9.0.0"
   },
-  "overrides": {
-    "libsignal-node": "https://github.com/whiskeysockets/libsignal-node.git"
-  },
   "engines": {
     "node": ">=18"
   }
