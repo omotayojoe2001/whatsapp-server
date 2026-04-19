@@ -1,9 +1,11 @@
 FROM node:20-slim
 
-RUN apt-get update && apt-get install -y git --no-install-recommends && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git openssh-client --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
-# Force git to use https instead of ssh
+# Force all git ssh URLs to use https
+ENV GIT_SSH_COMMAND="echo"
 RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.com/" && \
+    git config --global url."https://github.com/".insteadOf "git+ssh://git@github.com/" && \
     git config --global url."https://github.com/".insteadOf "git@github.com:"
 
 WORKDIR /app
