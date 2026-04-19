@@ -10,8 +10,12 @@
     "whatsapp-web.js": "^1.26.1-alpha.3",
     "express": "^4.21.0",
     "cors": "^2.8.5",
-    "qrcode": "^1.5.4",
-    "puppeteer": "^23.0.0"
+    "qrcode": "^1.5.4"
+  },
+  "overrides": {
+    "whatsapp-web.js": {
+      "puppeteer": "npm:puppeteer-core@^22.6.0"
+    }
   },
   "engines": {
     "node": ">=18"

@@ -27,7 +27,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 COPY package.json ./
-RUN npm install --production
+RUN npm install --production --legacy-peer-deps
 COPY . .
 
 EXPOSE 3100

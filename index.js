@@ -1,10 +1,18 @@
 const express = require("express");
-const cors = require("cors");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const QRCode = require("qrcode");
 
 const app = express();
-app.use(cors());
+
+// CORS — handle ALL requests including preflight
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, x-api-key, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json());
 
 const API_KEY = process.env.WA_API_KEY || "change-this-secret-key";
@@ -19,17 +27,29 @@ const auth = (req, res, next) => {
 };
 
 function getOrCreateSession(userId) {
-  if (sessions.has(userId)) return sessions.get(userId);
+  if (sessions.has(userId)) {
+    const existing = sessions.get(userId);
+    // If stuck in error/auth_failed, clean up and recreate
+    if (existing.status === "error" || existing.status === "auth_failed") {
+      cleanup(userId);
+    } else {
+      return existing;
+    }
+  }
 
   const session = { client: null, status: "initializing", qr: null, phone: null, error: null };
   sessions.set(userId, session);
   console.log(`[${userId}] Creating session...`);
 
+  const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+  console.log(`[${userId}] Chromium path: ${chromePath || "bundled"}`);
+
   const client = new Client({
     authStrategy: new LocalAuth({ clientId: userId }),
+    webVersionCache: { type: "none" },
     puppeteer: {
       headless: true,
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      executablePath: chromePath,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -57,11 +77,12 @@ function getOrCreateSession(userId) {
   client.on("qr", async (qr) => {
     session.status = "qr_ready";
     session.qr = await QRCode.toDataURL(qr);
-    console.log(`[${userId}] QR ready — scan now`);
+    console.log(`[${userId}] QR ready`);
   });
 
   client.on("authenticated", () => {
     session.status = "authenticated";
+    session.qr = null;
     console.log(`[${userId}] Authenticated — loading WhatsApp...`);
   });
 
@@ -75,12 +96,11 @@ function getOrCreateSession(userId) {
   client.on("auth_failure", (msg) => {
     session.status = "auth_failed";
     session.error = String(msg);
+    session.qr = null;
     console.error(`[${userId}] Auth failed:`, msg);
-    cleanup(userId);
   });
 
   client.on("disconnected", (reason) => {
-    session.status = "disconnected";
     console.log(`[${userId}] Disconnected:`, reason);
     cleanup(userId);
   });
@@ -97,8 +117,11 @@ function getOrCreateSession(userId) {
 
 function cleanup(userId) {
   const s = sessions.get(userId);
-  if (s?.client) s.client.destroy().catch(() => {});
+  if (s?.client) {
+    try { s.client.destroy(); } catch {}
+  }
   sessions.delete(userId);
+  console.log(`[${userId}] Cleaned up`);
 }
 
 // Health
@@ -174,7 +197,14 @@ app.get("/sessions", auth, (req, res) => {
   res.json(list);
 });
 
+// Catch uncaught errors so server doesn't crash
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT]", err.message);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED]", err);
+});
+
 app.listen(PORT, () => {
   console.log(`WhatsApp server on port ${PORT}`);
-  console.log(`Heap: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
 });
