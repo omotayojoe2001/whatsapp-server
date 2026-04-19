@@ -251,16 +251,42 @@ async function processSequences() {
       const { data: contacts } = await supabase.from("wa_sequence_contacts")
         .select("*").eq("sequence_id", seq.id).eq("status", "active");
       for (const contact of (contacts || [])) {
-        const enrolled = new Date(contact.enrolled_at);
-        const minsSinceEnroll = (now.getTime() - enrolled.getTime()) / 60000;
         const idx = contact.current_step || 0;
         if (idx >= steps.length) {
           await supabase.from("wa_sequence_contacts").update({ status: "completed" }).eq("id", contact.id);
           continue;
         }
         const step = steps[idx];
-        const delayMins = step.delayMinutes || (step.unit === "immediately" ? 0 : step.unit === "minutes" ? step.delay : step.unit === "hours" ? step.delay * 60 : step.delay * 1440);
-        if (minsSinceEnroll >= delayMins) {
+
+        // Calculate cumulative delay: sum of all steps up to current
+        let totalDelayMins = 0;
+        for (let i = 0; i <= idx; i++) {
+          const s = steps[i];
+          const dm = s.delayMinutes != null ? s.delayMinutes
+            : s.unit === "immediately" ? 0
+            : s.unit === "minutes" ? (s.delay || 0)
+            : s.unit === "hours" ? (s.delay || 0) * 60
+            : s.unit === "days" ? (s.delay || s.day || 0) * 1440
+            : 0;
+          totalDelayMins += dm;
+        }
+
+        const enrolled = new Date(contact.enrolled_at);
+        const minsSinceEnroll = (now.getTime() - enrolled.getTime()) / 60000;
+
+        // For day-based steps with specific time, check time too
+        let timeOk = true;
+        if (step.unit === "days" && step.time) {
+          const [h, m] = step.time.split(":").map(Number);
+          const nowH = now.getUTCHours();
+          const nowM = now.getUTCMinutes();
+          // Allow within 30 min window of target time
+          const targetMins = h * 60 + m;
+          const currentMins = nowH * 60 + nowM;
+          timeOk = currentMins >= targetMins && currentMins <= targetMins + 30;
+        }
+
+        if (minsSinceEnroll >= totalDelayMins && timeOk) {
           const cacheKey = `seq_${seq.id}_${contact.id}_step${idx}`;
           const { data: already } = await supabase.from("wa_message_queue").select("id").eq("campaign_id", cacheKey).limit(1);
           if (already?.length) continue;
@@ -269,7 +295,7 @@ async function processSequences() {
             status: "queued", campaign_id: cacheKey, type: "sequence", scheduled_at: new Date().toISOString(),
           });
           await supabase.from("wa_sequence_contacts").update({ current_step: idx + 1, last_sent_at: now.toISOString() }).eq("id", contact.id);
-          console.log(`[Seq] Step ${idx + 1} for ${contact.phone}`);
+          console.log(`[Seq] Step ${idx + 1} for ${contact.phone} (${step.unit === "immediately" ? "now" : step.delay + " " + step.unit})`);
         }
       }
     }
