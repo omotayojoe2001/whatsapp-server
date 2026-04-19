@@ -302,6 +302,14 @@ setInterval(processCampaigns, 30000);  // Campaigns every 30s
 setInterval(processSequences, 60000);  // Sequences every 60s
 setInterval(healthCheck, 120000);      // Health every 2min
 
+// Self-ping to prevent Railway/Render from sleeping
+setInterval(() => {
+  const url = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/`
+    : `http://localhost:${PORT}/`;
+  fetch(url).catch(() => {});
+}, 4 * 60 * 1000); // Every 4 min
+
 // ─── API ROUTES ───
 
 app.get("/", (req, res) => {
