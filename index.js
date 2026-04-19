@@ -243,13 +243,17 @@ async function processCampaigns() {
 async function processSequences() {
   if (!supabase) return;
   try {
-    const { data: seqs } = await supabase.from("wa_sequences").select("*").eq("status", "active");
+    const { data: seqs, error: seqErr } = await supabase.from("wa_sequences").select("*").eq("status", "active");
+    if (seqErr) { console.error("[Sequence] Fetch error:", seqErr.message); return; }
     if (!seqs?.length) return;
+    console.log(`[Sequence] Processing ${seqs.length} active sequence(s)`);
     const now = new Date();
     for (const seq of seqs) {
       const steps = seq.steps || [];
-      const { data: contacts } = await supabase.from("wa_sequence_contacts")
+      const { data: contacts, error: cErr } = await supabase.from("wa_sequence_contacts")
         .select("*").eq("sequence_id", seq.id).eq("status", "active");
+      if (cErr) { console.error(`[Sequence] Contacts fetch error:`, cErr.message); continue; }
+      console.log(`[Sequence] "${seq.name}": ${(contacts || []).length} active contact(s)`);
       for (const contact of (contacts || [])) {
         const idx = contact.current_step || 0;
         if (idx >= steps.length) {
