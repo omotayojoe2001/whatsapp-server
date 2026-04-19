@@ -10,7 +10,8 @@
     "whatsapp-web.js": "^1.26.1-alpha.3",
     "express": "^4.21.0",
     "cors": "^2.8.5",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "@supabase/supabase-js": "^2.45.0"
   },
   "overrides": {
     "whatsapp-web.js": {
