@@ -89,7 +89,7 @@ function getOrCreateSession(userId) {
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process", "--no-zygote", "--disable-extensions", "--disable-background-networking", "--disable-default-apps", "--disable-sync", "--disable-translate", "--no-first-run", "--js-flags=--max-old-space-size=256"],
     },
-    qrMaxRetries: 5,
+    qrMaxRetries: 0,
   });
 
   client.on("loading_screen", (percent, message) => { session.status = "loading"; console.log(`[${userId}] Loading: ${percent}%`); });
@@ -100,7 +100,13 @@ function getOrCreateSession(userId) {
     console.log(`[${userId}] Connected as ${session.phone}`);
     logSessionEvent(userId, "connected");
   });
-  client.on("auth_failure", (msg) => { session.status = "auth_failed"; session.error = String(msg); logSessionEvent(userId, "auth_failed"); });
+  client.on("auth_failure", (msg) => {
+    console.log(`[${userId}] Auth failed:`, msg);
+    session.status = "auth_failed"; session.error = String(msg);
+    logSessionEvent(userId, "auth_failed");
+    // Clear corrupted auth and allow retry
+    cleanup(userId);
+  });
   client.on("disconnected", (reason) => {
     console.log(`[${userId}] Disconnected:`, reason);
     logSessionEvent(userId, "disconnected");
@@ -124,11 +130,16 @@ function cleanup(userId) {
   const s = sessions.get(userId);
   if (s?.client) { try { s.client.destroy(); } catch {} }
   sessions.delete(userId);
+  // Clear stored auth so next QR scan starts fresh
+  const fs = require("fs");
+  const path = require("path");
+  const authDir = path.join(process.cwd(), ".wwebjs_auth", `session-${userId}`);
+  try { fs.rmSync(authDir, { recursive: true, force: true }); console.log(`[${userId}] Auth data cleared`); } catch {}
 }
 
 async function logSessionEvent(userId, event) {
   if (!supabase) return;
-  await supabase.from("wa_session_log").insert({ user_id: userId, event, timestamp: new Date().toISOString() }).catch(() => {});
+  try { await supabase.from("wa_session_log").insert({ user_id: userId, event, timestamp: new Date().toISOString() }); } catch {}
 }
 
 // ─── QUEUE PROCESSOR ───
