@@ -1,5 +1,5 @@
 const express = require("express");
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("baileys");
 const QRCode = require("qrcode");
 const pino = require("pino");
 const { createClient } = require("@supabase/supabase-js");
