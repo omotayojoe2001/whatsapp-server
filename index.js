@@ -203,11 +203,25 @@ async function getOrCreateSession(userId) {
 async function restoreSessions() {
   if (!supabase) return;
   const { data } = await supabase.from("wa_auth_store").select("user_id").like("id", "%_creds");
-  if (!data?.length) return;
+  if (!data?.length) { console.log("[Restore] No saved sessions"); return; }
   const userIds = [...new Set(data.map(r => r.user_id))];
-  console.log(`[Restore] Found ${userIds.length} saved session(s), reconnecting...`);
+  console.log(`[Restore] Found ${userIds.length} saved session(s)`);
   for (const userId of userIds) {
-    try { await getOrCreateSession(userId); } catch (e) { console.error(`[Restore] Failed for ${userId}:`, e.message); }
+    try {
+      await getOrCreateSession(userId);
+      // Wait a bit to see if it connects or fails
+      await new Promise(r => setTimeout(r, 5000));
+      const s = sessions.get(userId);
+      if (s && s.status !== "connected" && s.status !== "qr_ready" && s.status !== "connecting") {
+        console.log(`[Restore] ${userId} failed to restore, clearing stale auth`);
+        if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+        sessions.delete(userId);
+      }
+    } catch (e) {
+      console.error(`[Restore] Failed for ${userId}:`, e.message);
+      if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+      sessions.delete(userId);
+    }
   }
 }
 
