@@ -480,11 +480,13 @@ app.get("/groups/:userId/:groupId/participants", auth_mw, async (req, res) => {
   if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected" });
   try {
     const metadata = await session.sock.groupMetadata(req.params.groupId);
-    const participants = (metadata.participants || []).map(p => ({
-      phone: p.id.replace("@s.whatsapp.net", ""),
-      admin: p.admin || null,
-    }));
-    res.json({ name: metadata.subject, participants });
+    const participants = (metadata.participants || []).map(p => {
+      const id = p.id || "";
+      const isLid = id.includes("@lid");
+      const phone = isLid ? null : id.replace("@s.whatsapp.net", "");
+      return { phone, lid: isLid ? id : null, admin: p.admin || null };
+    }).filter(p => p.phone); // Only return real phone numbers
+    res.json({ name: metadata.subject, participants, total: metadata.participants?.length || 0, filtered: participants.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
