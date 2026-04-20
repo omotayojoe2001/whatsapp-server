@@ -227,6 +227,7 @@ async function processQueue() {
       try {
         const isGroup = msg.phone.includes("@g.us");
         const jid = isGroup ? msg.phone : msg.phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net";
+        console.log(`[Queue] Sending to ${isGroup ? "group" : "individual"}: ${jid}`);
         await session.sock.sendMessage(jid, { text: msg.message });
         recordSend(msg.user_id);
         await supabase.from("wa_message_queue").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", msg.id);
@@ -332,11 +333,13 @@ async function processRecurring() {
           continue; // Don't mark as done, retry next cycle
         }
         if (auto.channel === "whatsapp_group" && auto.target_id) {
-          // Send to group directly
-          const session = sessions.get(auto.user_id);
-          if (session?.status === "connected") {
-            try { await session.sock.sendMessage(auto.target_id, { text: auto.message }); } catch (e) { console.error(`[Recurring] Group send failed:`, e.message); }
-          }
+          // Queue group message through the queue processor
+          await supabase.from("wa_message_queue").insert({
+            user_id: auto.user_id, phone: auto.target_id, message: auto.message,
+            status: "queued", type: "recurring", campaign_id: `recurring_${auto.id}_${today}`,
+            scheduled_at: now.toISOString(),
+          });
+          console.log(`[Recurring] Queued group message for ${auto.target_id}`);
         } else {
           // Get phones from list or direct
           let phones = [];
