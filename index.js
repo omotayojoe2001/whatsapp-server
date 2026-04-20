@@ -318,7 +318,7 @@ async function processRecurring() {
       // Check time (within 5 min window)
       const [h, m] = auto.schedule_time.split(":").map(Number);
       const targetMins = h * 60 + m;
-      if (watMins < targetMins || watMins > targetMins + 5) continue;
+      if (watMins < targetMins || watMins > targetMins + 10) continue;
       // Check if already ran today
       const today = now.toISOString().split("T")[0];
       if (auto.last_run_at && auto.last_run_at.startsWith(today)) continue;
@@ -326,6 +326,11 @@ async function processRecurring() {
       console.log(`[Recurring] Running "${auto.name}" (${auto.channel})`);
 
       if (auto.channel === "whatsapp" || auto.channel === "whatsapp_group") {
+        const session = sessions.get(auto.user_id);
+        if (!session || session.status !== "connected") {
+          console.log(`[Recurring] "${auto.name}" skipped — session not connected, will retry`);
+          continue; // Don't mark as done, retry next cycle
+        }
         if (auto.channel === "whatsapp_group" && auto.target_id) {
           // Send to group directly
           const session = sessions.get(auto.user_id);
