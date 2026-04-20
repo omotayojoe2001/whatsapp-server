@@ -1,5 +1,5 @@
 const express = require("express");
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
 const QRCode = require("qrcode");
 const pino = require("pino");
 const { createClient } = require("@supabase/supabase-js");
@@ -124,7 +124,7 @@ async function getOrCreateSession(userId) {
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
     printQRInTerminal: false,
     logger,
-    browser: ["GoodDeeds", "Safari", "3.0"],
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
     connectTimeoutMs: 60000,
   });
 
