@@ -475,6 +475,19 @@ app.get("/groups/:userId", auth_mw, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get("/groups/:userId/:groupId/participants", auth_mw, async (req, res) => {
+  const session = sessions.get(req.params.userId);
+  if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected" });
+  try {
+    const metadata = await session.sock.groupMetadata(req.params.groupId);
+    const participants = (metadata.participants || []).map(p => ({
+      phone: p.id.replace("@s.whatsapp.net", ""),
+      admin: p.admin || null,
+    }));
+    res.json({ name: metadata.subject, participants });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post("/send/group", auth_mw, async (req, res) => {
   const { userId, groupId, message } = req.body;
   if (!userId || !groupId || !message) return res.status(400).json({ error: "userId, groupId, message required" });
