@@ -1,8 +1,10 @@
 const express = require("express");
-const { default: makeWASocket, DisconnectReason, makeCacheableSignalKeyStore, proto, initAuthCreds, BufferJSON } = require("baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("baileys");
 const QRCode = require("qrcode");
 const pino = require("pino");
 const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use((req, res, next) => {
@@ -18,6 +20,7 @@ const API_KEY = process.env.WA_API_KEY || "change-this-secret-key";
 const PORT = process.env.PORT || 3100;
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const AUTH_DIR = path.join(process.cwd(), "auth_sessions");
 
 const supabase = SUPABASE_URL ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const logger = pino({ level: "silent" });
@@ -25,58 +28,45 @@ const logger = pino({ level: "silent" });
 const sessions = new Map();
 const rateLimits = new Map();
 
-const auth = (req, res, next) => {
+const auth_mw = (req, res, next) => {
   if (req.headers["x-api-key"] !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
   next();
 };
 
-// ─── SUPABASE AUTH STATE (persists across redeploys) ───
-async function useSupabaseAuthState(userId) {
-  const key = (k) => `${userId}_${k}`;
+// ─── AUTH FILE BACKUP/RESTORE TO SUPABASE ───
+async function backupAuthToSupabase(userId) {
+  if (!supabase) return;
+  const authDir = path.join(AUTH_DIR, userId);
+  if (!fs.existsSync(authDir)) return;
+  const files = fs.readdirSync(authDir);
+  for (const file of files) {
+    const content = fs.readFileSync(path.join(authDir, file), "utf-8");
+    await supabase.from("wa_auth_store").upsert({
+      id: `${userId}_${file}`, user_id: userId, data: { content }, updated_at: new Date().toISOString(),
+    }, { onConflict: "id" });
+  }
+  console.log(`[Auth] Backed up ${files.length} files for ${userId}`);
+}
 
-  const readData = async (k) => {
-    if (!supabase) return null;
-    const { data } = await supabase.from("wa_auth_store").select("data").eq("id", key(k)).single();
-    return data?.data ? JSON.parse(JSON.stringify(data.data), BufferJSON.reviver) : null;
-  };
+async function restoreAuthFromSupabase(userId) {
+  if (!supabase) return false;
+  const { data } = await supabase.from("wa_auth_store").select("id, data").like("id", `${userId}_%`);
+  if (!data?.length) return false;
+  const authDir = path.join(AUTH_DIR, userId);
+  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+  for (const row of data) {
+    const fileName = row.id.replace(`${userId}_`, "");
+    fs.writeFileSync(path.join(authDir, fileName), row.data.content);
+  }
+  console.log(`[Auth] Restored ${data.length} files for ${userId}`);
+  return true;
+}
 
-  const writeData = async (k, value) => {
-    if (!supabase) return;
-    const serialized = JSON.parse(JSON.stringify(value, BufferJSON.replacer));
-    await supabase.from("wa_auth_store").upsert({ id: key(k), user_id: userId, data: serialized, updated_at: new Date().toISOString() }, { onConflict: "id" });
-  };
-
-  const removeData = async (k) => {
-    if (!supabase) return;
-    await supabase.from("wa_auth_store").delete().eq("id", key(k));
-  };
-
-  const creds = (await readData("creds")) || initAuthCreds();
-
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const result = {};
-          for (const id of ids) {
-            const val = await readData(`${type}-${id}`);
-            if (val) result[id] = val;
-          }
-          return result;
-        },
-        set: async (data) => {
-          for (const [type, entries] of Object.entries(data)) {
-            for (const [id, value] of Object.entries(entries)) {
-              if (value) await writeData(`${type}-${id}`, value);
-              else await removeData(`${type}-${id}`);
-            }
-          }
-        },
-      },
-    },
-    saveCreds: () => writeData("creds", creds),
-  };
+async function clearAuth(userId) {
+  const authDir = path.join(AUTH_DIR, userId);
+  try { fs.rmSync(authDir, { recursive: true, force: true }); } catch {}
+  if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+  console.log(`[Auth] Cleared for ${userId}`);
 }
 
 // ─── RATE LIMITER ───
@@ -88,7 +78,6 @@ function getRateLimit(userId) {
   if (rl.dailyDate !== new Date().toDateString()) { rl.dailySent = 0; rl.dailyDate = new Date().toDateString(); }
   return rl;
 }
-
 function canSend(userId) {
   const rl = getRateLimit(userId);
   if (rl.dailySent >= rl.dailyLimit) return { ok: false, reason: "daily_limit" };
@@ -96,20 +85,16 @@ function canSend(userId) {
   if (rl.paused && Date.now() >= rl.pauseUntil) { rl.paused = false; rl.batchSent = 0; }
   return { ok: true };
 }
-
 function recordSend(userId) {
   const rl = getRateLimit(userId);
   rl.dailySent++;
   rl.batchSent++;
-  const batchSize = 20 + Math.floor(Math.random() * 30);
-  if (rl.batchSent >= batchSize) {
+  if (rl.batchSent >= 20 + Math.floor(Math.random() * 30)) {
     rl.paused = true;
     rl.pauseUntil = Date.now() + (10 + Math.floor(Math.random() * 20)) * 60 * 1000;
     rl.batchSent = 0;
-    console.log(`[${userId}] Batch pause`);
   }
 }
-
 function randomDelay() { return (3 + Math.random() * 12) * 1000; }
 
 async function logEvent(userId, event) {
@@ -128,20 +113,25 @@ async function getOrCreateSession(userId) {
 
   const session = { sock: null, status: "connecting", qr: null, phone: null, error: null };
   sessions.set(userId, session);
-  console.log(`[${userId}] Creating Baileys session...`);
+  console.log(`[${userId}] Creating session...`);
 
-  const { state, saveCreds } = await useSupabaseAuthState(userId);
+  const authDir = path.join(AUTH_DIR, userId);
+  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
   const sock = makeWASocket({
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
     printQRInTerminal: false,
     logger,
-    browser: ["GoodDeeds", "Chrome", "1.0.0"],
+    browser: ["GoodDeeds", "Safari", "3.0"],
     connectTimeoutMs: 60000,
-    qrTimeout: undefined,
   });
 
-  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("creds.update", async () => {
+    await saveCreds();
+    backupAuthToSupabase(userId).catch(() => {});
+  });
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
@@ -158,22 +148,22 @@ async function getOrCreateSession(userId) {
       session.phone = sock.user?.id?.split(":")[0] || sock.user?.id?.split("@")[0] || null;
       console.log(`[${userId}] Connected as ${session.phone}`);
       logEvent(userId, "connected");
+      backupAuthToSupabase(userId).catch(() => {});
     }
 
     if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      console.log(`[${userId}] Disconnected, code: ${statusCode}`);
+      const code = lastDisconnect?.error?.output?.statusCode;
+      console.log(`[${userId}] Disconnected, code: ${code}`);
 
-      if (statusCode === DisconnectReason.loggedOut || statusCode === 405) {
-        console.log(`[${userId}] Session invalid (${statusCode}), clearing auth`);
-        if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+      if (code === DisconnectReason.loggedOut || code === 405 || code === 401) {
+        console.log(`[${userId}] Session invalid, clearing`);
+        await clearAuth(userId);
         session.status = "disconnected";
         session.qr = null;
         session.phone = null;
         sessions.delete(userId);
         logEvent(userId, "logged_out");
       } else {
-        console.log(`[${userId}] Reconnecting...`);
         session.status = "reconnecting";
         sessions.delete(userId);
         setTimeout(() => getOrCreateSession(userId), 5000);
@@ -186,10 +176,7 @@ async function getOrCreateSession(userId) {
       if (!msg.key.fromMe && msg.key.remoteJid?.endsWith("@s.whatsapp.net")) {
         const phone = msg.key.remoteJid.replace("@s.whatsapp.net", "");
         if (supabase) {
-          try {
-            await supabase.from("wa_sequence_contacts").update({ status: "replied", has_replied: true })
-              .eq("user_id", userId).eq("contact_phone", phone).eq("status", "active");
-          } catch {}
+          try { await supabase.from("wa_sequence_contacts").update({ status: "replied", has_replied: true }).eq("user_id", userId).eq("contact_phone", phone).eq("status", "active"); } catch {}
         }
       }
     }
@@ -199,27 +186,28 @@ async function getOrCreateSession(userId) {
   return session;
 }
 
-// ─── AUTO-RESTORE SESSIONS ON STARTUP ───
+// ─── AUTO-RESTORE ON STARTUP ───
 async function restoreSessions() {
   if (!supabase) return;
-  const { data } = await supabase.from("wa_auth_store").select("user_id").like("id", "%_creds");
+  const { data } = await supabase.from("wa_auth_store").select("user_id").like("id", "%_creds.json");
   if (!data?.length) { console.log("[Restore] No saved sessions"); return; }
   const userIds = [...new Set(data.map(r => r.user_id))];
-  console.log(`[Restore] Found ${userIds.length} saved session(s)`);
+  console.log(`[Restore] Found ${userIds.length} session(s)`);
   for (const userId of userIds) {
+    const restored = await restoreAuthFromSupabase(userId);
+    if (!restored) continue;
     try {
       await getOrCreateSession(userId);
-      // Wait a bit to see if it connects or fails
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 8000));
       const s = sessions.get(userId);
-      if (s && s.status !== "connected" && s.status !== "qr_ready" && s.status !== "connecting") {
-        console.log(`[Restore] ${userId} failed to restore, clearing stale auth`);
-        if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+      if (s && s.status !== "connected" && s.status !== "qr_ready") {
+        console.log(`[Restore] ${userId} failed, clearing`);
+        await clearAuth(userId);
         sessions.delete(userId);
       }
     } catch (e) {
-      console.error(`[Restore] Failed for ${userId}:`, e.message);
-      if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+      console.error(`[Restore] ${userId} error:`, e.message);
+      await clearAuth(userId);
       sessions.delete(userId);
     }
   }
@@ -229,33 +217,22 @@ async function restoreSessions() {
 async function processQueue() {
   if (!supabase) return;
   try {
-    const { data: pending } = await supabase.from("wa_message_queue")
-      .select("*").eq("status", "queued").order("created_at", { ascending: true }).limit(10);
+    const { data: pending } = await supabase.from("wa_message_queue").select("*").eq("status", "queued").order("created_at", { ascending: true }).limit(10);
     if (!pending?.length) return;
     for (const msg of pending) {
       const session = sessions.get(msg.user_id);
-      if (!session || session.status !== "connected") {
-        await supabase.from("wa_message_queue").update({ status: "failed", error_message: "Session not connected" }).eq("id", msg.id);
-        continue;
-      }
+      if (!session || session.status !== "connected") { await supabase.from("wa_message_queue").update({ status: "failed", error_message: "Session not connected" }).eq("id", msg.id); continue; }
       const check = canSend(msg.user_id);
-      if (!check.ok) {
-        if (check.reason === "daily_limit") await supabase.from("wa_message_queue").update({ status: "failed", error_message: "Daily limit reached" }).eq("id", msg.id);
-        continue;
-      }
+      if (!check.ok) { if (check.reason === "daily_limit") await supabase.from("wa_message_queue").update({ status: "failed", error_message: "Daily limit" }).eq("id", msg.id); continue; }
       try {
-        const jid = msg.phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net";
-        await session.sock.sendMessage(jid, { text: msg.message });
+        await session.sock.sendMessage(msg.phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net", { text: msg.message });
         recordSend(msg.user_id);
         await supabase.from("wa_message_queue").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", msg.id);
         console.log(`[Queue] Sent to ${msg.phone}`);
       } catch (err) {
         const retries = (msg.retry_count || 0) + 1;
-        if (retries >= 3) {
-          await supabase.from("wa_message_queue").update({ status: "failed", error_message: err.message, retry_count: retries }).eq("id", msg.id);
-        } else {
-          await supabase.from("wa_message_queue").update({ retry_count: retries }).eq("id", msg.id);
-        }
+        if (retries >= 3) await supabase.from("wa_message_queue").update({ status: "failed", error_message: err.message, retry_count: retries }).eq("id", msg.id);
+        else await supabase.from("wa_message_queue").update({ retry_count: retries }).eq("id", msg.id);
       }
       await new Promise(r => setTimeout(r, randomDelay()));
     }
@@ -267,21 +244,18 @@ async function processCampaigns() {
   if (!supabase) return;
   try {
     const { data: campaigns } = await supabase.from("wa_campaigns").select("*").eq("status", "active").lte("scheduled_at", new Date().toISOString());
-    if (!campaigns?.length) return;
-    for (const campaign of campaigns) {
-      console.log(`[Campaign] Processing: ${campaign.name}`);
-      await supabase.from("wa_campaigns").update({ status: "processing" }).eq("id", campaign.id);
-      const { data: contacts } = await supabase.from("wa_campaign_contacts").select("phone").eq("campaign_id", campaign.id).eq("status", "pending");
-      if (!contacts?.length) { await supabase.from("wa_campaigns").update({ status: "completed", completed_at: new Date().toISOString() }).eq("id", campaign.id); continue; }
-      const items = contacts.map(c => ({ user_id: campaign.user_id, phone: c.phone, message: campaign.message, status: "queued", campaign_id: campaign.id, type: "campaign", scheduled_at: new Date().toISOString() }));
-      await supabase.from("wa_message_queue").insert(items);
-      await supabase.from("wa_campaign_contacts").update({ status: "queued" }).eq("campaign_id", campaign.id).eq("status", "pending");
-      await supabase.from("wa_campaigns").update({ status: "sending", total_contacts: contacts.length }).eq("id", campaign.id);
+    for (const c of (campaigns || [])) {
+      await supabase.from("wa_campaigns").update({ status: "processing" }).eq("id", c.id);
+      const { data: contacts } = await supabase.from("wa_campaign_contacts").select("phone").eq("campaign_id", c.id).eq("status", "pending");
+      if (!contacts?.length) { await supabase.from("wa_campaigns").update({ status: "completed", completed_at: new Date().toISOString() }).eq("id", c.id); continue; }
+      await supabase.from("wa_message_queue").insert(contacts.map(ct => ({ user_id: c.user_id, phone: ct.phone, message: c.message, status: "queued", campaign_id: c.id, type: "campaign", scheduled_at: new Date().toISOString() })));
+      await supabase.from("wa_campaign_contacts").update({ status: "queued" }).eq("campaign_id", c.id).eq("status", "pending");
+      await supabase.from("wa_campaigns").update({ status: "sending", total_contacts: contacts.length }).eq("id", c.id);
     }
     const { data: sending } = await supabase.from("wa_campaigns").select("id").eq("status", "sending");
     for (const c of (sending || [])) {
-      const { count: remaining } = await supabase.from("wa_message_queue").select("id", { count: "exact", head: true }).eq("campaign_id", c.id).eq("status", "queued");
-      if (remaining === 0) {
+      const { count: rem } = await supabase.from("wa_message_queue").select("id", { count: "exact", head: true }).eq("campaign_id", c.id).eq("status", "queued");
+      if (rem === 0) {
         const { count: sent } = await supabase.from("wa_message_queue").select("id", { count: "exact", head: true }).eq("campaign_id", c.id).eq("status", "sent");
         const { count: failed } = await supabase.from("wa_message_queue").select("id", { count: "exact", head: true }).eq("campaign_id", c.id).eq("status", "failed");
         await supabase.from("wa_campaigns").update({ status: "completed", completed_at: new Date().toISOString(), sent_count: sent || 0, failed_count: failed || 0 }).eq("id", c.id);
@@ -294,39 +268,28 @@ async function processCampaigns() {
 async function processSequences() {
   if (!supabase) return;
   try {
-    const { data: seqs, error: seqErr } = await supabase.from("wa_sequences").select("*").eq("status", "active");
-    if (seqErr) { console.error("[Sequence] Fetch error:", seqErr.message); return; }
+    const { data: seqs } = await supabase.from("wa_sequences").select("*").eq("status", "active");
     if (!seqs?.length) return;
-    console.log(`[Sequence] Processing ${seqs.length} active sequence(s)`);
+    console.log(`[Sequence] Processing ${seqs.length} sequence(s)`);
     const now = new Date();
     for (const seq of seqs) {
       const steps = seq.steps || [];
-      const { data: contacts, error: cErr } = await supabase.from("wa_sequence_contacts").select("*").eq("sequence_id", seq.id).eq("status", "active");
-      if (cErr) { console.error("[Sequence] Contacts error:", cErr.message); continue; }
-      console.log(`[Sequence] "${seq.name}": ${(contacts || []).length} active contact(s)`);
+      const { data: contacts } = await supabase.from("wa_sequence_contacts").select("*").eq("sequence_id", seq.id).eq("status", "active");
+      console.log(`[Sequence] "${seq.name}": ${(contacts || []).length} contact(s)`);
       for (const contact of (contacts || [])) {
         const idx = contact.current_step || 0;
         if (idx >= steps.length) { await supabase.from("wa_sequence_contacts").update({ status: "completed" }).eq("id", contact.id); continue; }
         const step = steps[idx];
-        let totalDelayMins = 0;
-        for (let i = 0; i <= idx; i++) {
-          const s = steps[i];
-          totalDelayMins += s.delayMinutes != null ? s.delayMinutes : s.unit === "immediately" ? 0 : s.unit === "minutes" ? (s.delay || 0) : s.unit === "hours" ? (s.delay || 0) * 60 : (s.delay || s.day || 0) * 1440;
-        }
-        const enrolled = new Date(contact.created_at);
-        const minsSinceEnroll = (now.getTime() - enrolled.getTime()) / 60000;
+        let totalMins = 0;
+        for (let i = 0; i <= idx; i++) { const s = steps[i]; totalMins += s.delayMinutes != null ? s.delayMinutes : s.unit === "immediately" ? 0 : s.unit === "minutes" ? (s.delay || 0) : s.unit === "hours" ? (s.delay || 0) * 60 : (s.delay || 0) * 1440; }
+        const mins = (now.getTime() - new Date(contact.created_at).getTime()) / 60000;
         let timeOk = true;
-        if (step.unit === "days" && step.time) {
-          const [h, m] = step.time.split(":").map(Number);
-          const targetMins = h * 60 + m;
-          const currentMins = now.getUTCHours() * 60 + now.getUTCMinutes();
-          timeOk = currentMins >= targetMins && currentMins <= targetMins + 30;
-        }
-        if (minsSinceEnroll >= totalDelayMins && timeOk) {
-          const cacheKey = `seq_${seq.id}_${contact.id}_step${idx}`;
-          const { data: already } = await supabase.from("wa_message_queue").select("id").eq("campaign_id", cacheKey).limit(1);
+        if (step.unit === "days" && step.time) { const [h, m] = step.time.split(":").map(Number); const t = h * 60 + m, c = now.getUTCHours() * 60 + now.getUTCMinutes(); timeOk = c >= t && c <= t + 30; }
+        if (mins >= totalMins && timeOk) {
+          const ck = `seq_${seq.id}_${contact.id}_step${idx}`;
+          const { data: already } = await supabase.from("wa_message_queue").select("id").eq("campaign_id", ck).limit(1);
           if (already?.length) continue;
-          await supabase.from("wa_message_queue").insert({ user_id: seq.user_id, phone: contact.contact_phone, message: step.message, status: "queued", campaign_id: cacheKey, type: "sequence", scheduled_at: new Date().toISOString() });
+          await supabase.from("wa_message_queue").insert({ user_id: seq.user_id, phone: contact.contact_phone, message: step.message, status: "queued", campaign_id: ck, type: "sequence", scheduled_at: new Date().toISOString() });
           await supabase.from("wa_sequence_contacts").update({ current_step: idx + 1, last_sent_at: now.toISOString() }).eq("id", contact.id);
           console.log(`[Seq] Step ${idx + 1} for ${contact.contact_phone}`);
         }
@@ -339,79 +302,67 @@ async function processSequences() {
 setInterval(processQueue, 5000);
 setInterval(processCampaigns, 30000);
 setInterval(processSequences, 60000);
-setInterval(() => {
-  const url = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/` : `http://localhost:${PORT}/`;
-  fetch(url).catch(() => {});
-}, 4 * 60 * 1000);
+setInterval(() => { fetch(process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/` : `http://localhost:${PORT}/`).catch(() => {}); }, 4 * 60 * 1000);
 
-// ─── API ROUTES ───
+// ─── ROUTES ───
 app.get("/", (req, res) => {
   const list = [];
   for (const [uid, s] of sessions) list.push({ userId: uid, status: s.status, phone: s.phone });
   res.json({ status: "ok", engine: "baileys", sessions: sessions.size, mem: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + "MB", details: list });
 });
-
-app.post("/session/start", auth, async (req, res) => {
+app.post("/session/start", auth_mw, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: "userId required" });
   const session = await getOrCreateSession(userId);
   res.json({ status: session.status, qr: session.qr, phone: session.phone, error: session.error });
 });
-
-app.get("/session/status/:userId", auth, (req, res) => {
+app.get("/session/status/:userId", auth_mw, (req, res) => {
   const session = sessions.get(req.params.userId);
   if (!session) return res.json({ status: "none" });
   const rl = getRateLimit(req.params.userId);
   res.json({ status: session.status, qr: session.qr, phone: session.phone, error: session.error, dailySent: rl.dailySent, dailyLimit: rl.dailyLimit, paused: rl.paused });
 });
-
-app.post("/session/disconnect", auth, async (req, res) => {
+app.post("/session/disconnect", auth_mw, async (req, res) => {
   const { userId } = req.body;
   const session = sessions.get(userId);
   if (!session) return res.json({ status: "not_found" });
   try { await session.sock.logout(); } catch {}
   try { session.sock.end(); } catch {}
-  if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
+  await clearAuth(userId);
   sessions.delete(userId);
   res.json({ status: "disconnected" });
 });
-
-app.post("/send", auth, async (req, res) => {
+app.post("/send", auth_mw, async (req, res) => {
   const { userId, phone, message } = req.body;
   if (!userId || !phone || !message) return res.status(400).json({ error: "userId, phone, message required" });
   const session = sessions.get(userId);
-  if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected", status: session?.status || "none" });
+  if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected" });
   const check = canSend(userId);
-  if (!check.ok) return res.status(429).json({ error: check.reason, resumeIn: check.resumeIn });
+  if (!check.ok) return res.status(429).json({ error: check.reason });
   try {
-    const jid = phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net";
-    await session.sock.sendMessage(jid, { text: message });
+    await session.sock.sendMessage(phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net", { text: message });
     recordSend(userId);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
-app.post("/queue", auth, async (req, res) => {
-  const { userId, phone, message, type } = req.body;
-  if (!userId || !phone || !message) return res.status(400).json({ error: "userId, phone, message required" });
+app.post("/queue", auth_mw, async (req, res) => {
+  const { userId, phone, message } = req.body;
+  if (!userId || !phone || !message) return res.status(400).json({ error: "required" });
   if (!supabase) return res.status(500).json({ error: "DB not configured" });
-  await supabase.from("wa_message_queue").insert({ user_id: userId, phone, message, status: "queued", type: type || "direct", scheduled_at: new Date().toISOString() });
-  res.json({ success: true, queued: true });
+  await supabase.from("wa_message_queue").insert({ user_id: userId, phone, message, status: "queued", type: "direct", scheduled_at: new Date().toISOString() });
+  res.json({ success: true });
 });
-
-app.post("/send/bulk", auth, async (req, res) => {
+app.post("/send/bulk", auth_mw, async (req, res) => {
   const { userId, contacts, message } = req.body;
-  if (!userId || !contacts?.length || !message) return res.status(400).json({ error: "userId, contacts[], message required" });
+  if (!userId || !contacts?.length || !message) return res.status(400).json({ error: "required" });
   if (!supabase) return res.status(500).json({ error: "DB not configured" });
-  const items = contacts.map(phone => ({ user_id: userId, phone, message, status: "queued", type: "bulk", scheduled_at: new Date().toISOString() }));
-  await supabase.from("wa_message_queue").insert(items);
+  await supabase.from("wa_message_queue").insert(contacts.map(p => ({ user_id: userId, phone: p, message, status: "queued", type: "bulk", scheduled_at: new Date().toISOString() })));
   res.json({ success: true, queued: contacts.length });
 });
-
-app.get("/rate-limit/:userId", auth, (req, res) => { res.json(getRateLimit(req.params.userId)); });
-app.get("/sessions", auth, (req, res) => {
+app.get("/rate-limit/:userId", auth_mw, (req, res) => { res.json(getRateLimit(req.params.userId)); });
+app.get("/sessions", auth_mw, (req, res) => {
   const list = [];
-  for (const [userId, s] of sessions) list.push({ userId, status: s.status, phone: s.phone });
+  for (const [uid, s] of sessions) list.push({ userId: uid, status: s.status, phone: s.phone });
   res.json(list);
 });
 
@@ -421,6 +372,5 @@ process.on("unhandledRejection", (err) => console.error("[UNHANDLED]", err));
 app.listen(PORT, async () => {
   console.log(`WhatsApp server (Baileys) on port ${PORT}`);
   console.log(`Supabase: ${SUPABASE_URL ? "connected" : "NOT configured"}`);
-  // Auto-restore saved sessions
   await restoreSessions();
 });
