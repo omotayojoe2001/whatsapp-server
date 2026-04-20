@@ -225,7 +225,9 @@ async function processQueue() {
       const check = canSend(msg.user_id);
       if (!check.ok) { if (check.reason === "daily_limit") await supabase.from("wa_message_queue").update({ status: "failed", error_message: "Daily limit" }).eq("id", msg.id); continue; }
       try {
-        await session.sock.sendMessage(msg.phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net", { text: msg.message });
+        const isGroup = msg.phone.includes("@g.us");
+        const jid = isGroup ? msg.phone : msg.phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net";
+        await session.sock.sendMessage(jid, { text: msg.message });
         recordSend(msg.user_id);
         await supabase.from("wa_message_queue").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", msg.id);
         console.log(`[Queue] Sent to ${msg.phone}`);
