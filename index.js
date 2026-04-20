@@ -1,10 +1,8 @@
 const express = require("express");
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("baileys");
+const { default: makeWASocket, DisconnectReason, makeCacheableSignalKeyStore, proto, initAuthCreds, BufferJSON } = require("baileys");
 const QRCode = require("qrcode");
 const pino = require("pino");
 const { createClient } = require("@supabase/supabase-js");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 app.use((req, res, next) => {
@@ -20,12 +18,10 @@ const API_KEY = process.env.WA_API_KEY || "change-this-secret-key";
 const PORT = process.env.PORT || 3100;
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const AUTH_DIR = path.join(process.cwd(), "auth_sessions");
 
 const supabase = SUPABASE_URL ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 const logger = pino({ level: "silent" });
 
-// Session store: userId -> { sock, status, qr, phone }
 const sessions = new Map();
 const rateLimits = new Map();
 
@@ -33,6 +29,55 @@ const auth = (req, res, next) => {
   if (req.headers["x-api-key"] !== API_KEY) return res.status(401).json({ error: "Unauthorized" });
   next();
 };
+
+// ─── SUPABASE AUTH STATE (persists across redeploys) ───
+async function useSupabaseAuthState(userId) {
+  const key = (k) => `${userId}_${k}`;
+
+  const readData = async (k) => {
+    if (!supabase) return null;
+    const { data } = await supabase.from("wa_auth_store").select("data").eq("id", key(k)).single();
+    return data?.data ? JSON.parse(JSON.stringify(data.data), BufferJSON.reviver) : null;
+  };
+
+  const writeData = async (k, value) => {
+    if (!supabase) return;
+    const serialized = JSON.parse(JSON.stringify(value, BufferJSON.replacer));
+    await supabase.from("wa_auth_store").upsert({ id: key(k), user_id: userId, data: serialized, updated_at: new Date().toISOString() }, { onConflict: "id" });
+  };
+
+  const removeData = async (k) => {
+    if (!supabase) return;
+    await supabase.from("wa_auth_store").delete().eq("id", key(k));
+  };
+
+  const creds = (await readData("creds")) || initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const result = {};
+          for (const id of ids) {
+            const val = await readData(`${type}-${id}`);
+            if (val) result[id] = val;
+          }
+          return result;
+        },
+        set: async (data) => {
+          for (const [type, entries] of Object.entries(data)) {
+            for (const [id, value] of Object.entries(entries)) {
+              if (value) await writeData(`${type}-${id}`, value);
+              else await removeData(`${type}-${id}`);
+            }
+          }
+        },
+      },
+    },
+    saveCreds: () => writeData("creds", creds),
+  };
+}
 
 // ─── RATE LIMITER ───
 function getRateLimit(userId) {
@@ -77,7 +122,6 @@ async function getOrCreateSession(userId) {
   if (sessions.has(userId)) {
     const existing = sessions.get(userId);
     if (existing.status === "connected" || existing.status === "qr_ready" || existing.status === "connecting") return existing;
-    // Clean up broken session
     if (existing.sock) { try { existing.sock.end(); } catch {} }
     sessions.delete(userId);
   }
@@ -86,10 +130,7 @@ async function getOrCreateSession(userId) {
   sessions.set(userId, session);
   console.log(`[${userId}] Creating Baileys session...`);
 
-  const authDir = path.join(AUTH_DIR, userId);
-  if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
-
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const { state, saveCreds } = await useSupabaseAuthState(userId);
 
   const sock = makeWASocket({
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
@@ -121,20 +162,17 @@ async function getOrCreateSession(userId) {
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const reason = DisconnectReason;
       console.log(`[${userId}] Disconnected, code: ${statusCode}`);
 
-      if (statusCode === reason.loggedOut) {
-        // User logged out from phone — clear auth and stop
+      if (statusCode === DisconnectReason.loggedOut) {
         console.log(`[${userId}] Logged out, clearing auth`);
-        try { fs.rmSync(authDir, { recursive: true, force: true }); } catch {}
+        if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
         session.status = "disconnected";
         session.qr = null;
         session.phone = null;
         sessions.delete(userId);
         logEvent(userId, "logged_out");
       } else {
-        // Reconnect automatically
         console.log(`[${userId}] Reconnecting...`);
         session.status = "reconnecting";
         sessions.delete(userId);
@@ -143,7 +181,6 @@ async function getOrCreateSession(userId) {
     }
   });
 
-  // Track incoming messages for sequence stop-on-reply
   sock.ev.on("messages.upsert", async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.key.fromMe && msg.key.remoteJid?.endsWith("@s.whatsapp.net")) {
@@ -162,6 +199,18 @@ async function getOrCreateSession(userId) {
   return session;
 }
 
+// ─── AUTO-RESTORE SESSIONS ON STARTUP ───
+async function restoreSessions() {
+  if (!supabase) return;
+  const { data } = await supabase.from("wa_auth_store").select("user_id").like("id", "%_creds");
+  if (!data?.length) return;
+  const userIds = [...new Set(data.map(r => r.user_id))];
+  console.log(`[Restore] Found ${userIds.length} saved session(s), reconnecting...`);
+  for (const userId of userIds) {
+    try { await getOrCreateSession(userId); } catch (e) { console.error(`[Restore] Failed for ${userId}:`, e.message); }
+  }
+}
+
 // ─── QUEUE PROCESSOR ───
 async function processQueue() {
   if (!supabase) return;
@@ -169,7 +218,6 @@ async function processQueue() {
     const { data: pending } = await supabase.from("wa_message_queue")
       .select("*").eq("status", "queued").order("created_at", { ascending: true }).limit(10);
     if (!pending?.length) return;
-
     for (const msg of pending) {
       const session = sessions.get(msg.user_id);
       if (!session || session.status !== "connected") {
@@ -204,29 +252,18 @@ async function processQueue() {
 async function processCampaigns() {
   if (!supabase) return;
   try {
-    const { data: campaigns } = await supabase.from("wa_campaigns")
-      .select("*").eq("status", "active").lte("scheduled_at", new Date().toISOString());
+    const { data: campaigns } = await supabase.from("wa_campaigns").select("*").eq("status", "active").lte("scheduled_at", new Date().toISOString());
     if (!campaigns?.length) return;
-
     for (const campaign of campaigns) {
       console.log(`[Campaign] Processing: ${campaign.name}`);
       await supabase.from("wa_campaigns").update({ status: "processing" }).eq("id", campaign.id);
-      const { data: contacts } = await supabase.from("wa_campaign_contacts")
-        .select("phone").eq("campaign_id", campaign.id).eq("status", "pending");
-      if (!contacts?.length) {
-        await supabase.from("wa_campaigns").update({ status: "completed", completed_at: new Date().toISOString() }).eq("id", campaign.id);
-        continue;
-      }
-      const items = contacts.map(c => ({
-        user_id: campaign.user_id, phone: c.phone, message: campaign.message,
-        status: "queued", campaign_id: campaign.id, type: "campaign", scheduled_at: new Date().toISOString(),
-      }));
+      const { data: contacts } = await supabase.from("wa_campaign_contacts").select("phone").eq("campaign_id", campaign.id).eq("status", "pending");
+      if (!contacts?.length) { await supabase.from("wa_campaigns").update({ status: "completed", completed_at: new Date().toISOString() }).eq("id", campaign.id); continue; }
+      const items = contacts.map(c => ({ user_id: campaign.user_id, phone: c.phone, message: campaign.message, status: "queued", campaign_id: campaign.id, type: "campaign", scheduled_at: new Date().toISOString() }));
       await supabase.from("wa_message_queue").insert(items);
       await supabase.from("wa_campaign_contacts").update({ status: "queued" }).eq("campaign_id", campaign.id).eq("status", "pending");
       await supabase.from("wa_campaigns").update({ status: "sending", total_contacts: contacts.length }).eq("id", campaign.id);
-      console.log(`[Campaign] Queued ${contacts.length} msgs`);
     }
-
     const { data: sending } = await supabase.from("wa_campaigns").select("id").eq("status", "sending");
     for (const c of (sending || [])) {
       const { count: remaining } = await supabase.from("wa_message_queue").select("id", { count: "exact", head: true }).eq("campaign_id", c.id).eq("status", "queued");
@@ -250,56 +287,34 @@ async function processSequences() {
     const now = new Date();
     for (const seq of seqs) {
       const steps = seq.steps || [];
-      const { data: contacts, error: cErr } = await supabase.from("wa_sequence_contacts")
-        .select("*").eq("sequence_id", seq.id).eq("status", "active");
-      if (cErr) { console.error(`[Sequence] Contacts fetch error:`, cErr.message); continue; }
+      const { data: contacts, error: cErr } = await supabase.from("wa_sequence_contacts").select("*").eq("sequence_id", seq.id).eq("status", "active");
+      if (cErr) { console.error("[Sequence] Contacts error:", cErr.message); continue; }
       console.log(`[Sequence] "${seq.name}": ${(contacts || []).length} active contact(s)`);
       for (const contact of (contacts || [])) {
         const idx = contact.current_step || 0;
-        if (idx >= steps.length) {
-          await supabase.from("wa_sequence_contacts").update({ status: "completed" }).eq("id", contact.id);
-          continue;
-        }
+        if (idx >= steps.length) { await supabase.from("wa_sequence_contacts").update({ status: "completed" }).eq("id", contact.id); continue; }
         const step = steps[idx];
-
-        // Calculate cumulative delay: sum of all steps up to current
         let totalDelayMins = 0;
         for (let i = 0; i <= idx; i++) {
           const s = steps[i];
-          const dm = s.delayMinutes != null ? s.delayMinutes
-            : s.unit === "immediately" ? 0
-            : s.unit === "minutes" ? (s.delay || 0)
-            : s.unit === "hours" ? (s.delay || 0) * 60
-            : s.unit === "days" ? (s.delay || s.day || 0) * 1440
-            : 0;
-          totalDelayMins += dm;
+          totalDelayMins += s.delayMinutes != null ? s.delayMinutes : s.unit === "immediately" ? 0 : s.unit === "minutes" ? (s.delay || 0) : s.unit === "hours" ? (s.delay || 0) * 60 : (s.delay || s.day || 0) * 1440;
         }
-
         const enrolled = new Date(contact.created_at);
         const minsSinceEnroll = (now.getTime() - enrolled.getTime()) / 60000;
-
-        // For day-based steps with specific time, check time too
         let timeOk = true;
         if (step.unit === "days" && step.time) {
           const [h, m] = step.time.split(":").map(Number);
-          const nowH = now.getUTCHours();
-          const nowM = now.getUTCMinutes();
-          // Allow within 30 min window of target time
           const targetMins = h * 60 + m;
-          const currentMins = nowH * 60 + nowM;
+          const currentMins = now.getUTCHours() * 60 + now.getUTCMinutes();
           timeOk = currentMins >= targetMins && currentMins <= targetMins + 30;
         }
-
         if (minsSinceEnroll >= totalDelayMins && timeOk) {
           const cacheKey = `seq_${seq.id}_${contact.id}_step${idx}`;
           const { data: already } = await supabase.from("wa_message_queue").select("id").eq("campaign_id", cacheKey).limit(1);
           if (already?.length) continue;
-          await supabase.from("wa_message_queue").insert({
-            user_id: seq.user_id, phone: contact.contact_phone, message: step.message,
-            status: "queued", campaign_id: cacheKey, type: "sequence", scheduled_at: new Date().toISOString(),
-          });
+          await supabase.from("wa_message_queue").insert({ user_id: seq.user_id, phone: contact.contact_phone, message: step.message, status: "queued", campaign_id: cacheKey, type: "sequence", scheduled_at: new Date().toISOString() });
           await supabase.from("wa_sequence_contacts").update({ current_step: idx + 1, last_sent_at: now.toISOString() }).eq("id", contact.id);
-          console.log(`[Seq] Step ${idx + 1} for ${contact.contact_phone} (${step.unit === "immediately" ? "now" : step.delay + " " + step.unit})`);
+          console.log(`[Seq] Step ${idx + 1} for ${contact.contact_phone}`);
         }
       }
     }
@@ -310,17 +325,12 @@ async function processSequences() {
 setInterval(processQueue, 5000);
 setInterval(processCampaigns, 30000);
 setInterval(processSequences, 60000);
-
-// Self-ping keepalive
 setInterval(() => {
-  const url = process.env.RAILWAY_PUBLIC_DOMAIN
-    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/`
-    : `http://localhost:${PORT}/`;
+  const url = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/` : `http://localhost:${PORT}/`;
   fetch(url).catch(() => {});
 }, 4 * 60 * 1000);
 
 // ─── API ROUTES ───
-
 app.get("/", (req, res) => {
   const list = [];
   for (const [uid, s] of sessions) list.push({ userId: uid, status: s.status, phone: s.phone });
@@ -347,8 +357,7 @@ app.post("/session/disconnect", auth, async (req, res) => {
   if (!session) return res.json({ status: "not_found" });
   try { await session.sock.logout(); } catch {}
   try { session.sock.end(); } catch {}
-  const authDir = path.join(AUTH_DIR, userId);
-  try { fs.rmSync(authDir, { recursive: true, force: true }); } catch {}
+  if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
   sessions.delete(userId);
   res.json({ status: "disconnected" });
 });
@@ -365,9 +374,7 @@ app.post("/send", auth, async (req, res) => {
     await session.sock.sendMessage(jid, { text: message });
     recordSend(userId);
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post("/queue", auth, async (req, res) => {
@@ -387,11 +394,7 @@ app.post("/send/bulk", auth, async (req, res) => {
   res.json({ success: true, queued: contacts.length });
 });
 
-app.get("/rate-limit/:userId", auth, (req, res) => {
-  const rl = getRateLimit(req.params.userId);
-  res.json(rl);
-});
-
+app.get("/rate-limit/:userId", auth, (req, res) => { res.json(getRateLimit(req.params.userId)); });
 app.get("/sessions", auth, (req, res) => {
   const list = [];
   for (const [userId, s] of sessions) list.push({ userId, status: s.status, phone: s.phone });
@@ -401,7 +404,9 @@ app.get("/sessions", auth, (req, res) => {
 process.on("uncaughtException", (err) => console.error("[UNCAUGHT]", err.message));
 process.on("unhandledRejection", (err) => console.error("[UNHANDLED]", err));
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`WhatsApp server (Baileys) on port ${PORT}`);
   console.log(`Supabase: ${SUPABASE_URL ? "connected" : "NOT configured"}`);
+  // Auto-restore saved sessions
+  await restoreSessions();
 });
