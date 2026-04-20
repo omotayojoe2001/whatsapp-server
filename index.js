@@ -164,8 +164,8 @@ async function getOrCreateSession(userId) {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log(`[${userId}] Disconnected, code: ${statusCode}`);
 
-      if (statusCode === DisconnectReason.loggedOut) {
-        console.log(`[${userId}] Logged out, clearing auth`);
+      if (statusCode === DisconnectReason.loggedOut || statusCode === 405) {
+        console.log(`[${userId}] Session invalid (${statusCode}), clearing auth`);
         if (supabase) await supabase.from("wa_auth_store").delete().like("id", `${userId}_%`);
         session.status = "disconnected";
         session.qr = null;
@@ -176,7 +176,7 @@ async function getOrCreateSession(userId) {
         console.log(`[${userId}] Reconnecting...`);
         session.status = "reconnecting";
         sessions.delete(userId);
-        setTimeout(() => getOrCreateSession(userId), 3000);
+        setTimeout(() => getOrCreateSession(userId), 5000);
       }
     }
   });
