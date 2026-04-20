@@ -298,10 +298,95 @@ async function processSequences() {
   } catch (err) { console.error("[Sequence]", err.message); }
 }
 
+// ─── RECURRING AUTOMATIONS PROCESSOR ───
+async function processRecurring() {
+  if (!supabase) return;
+  try {
+    const { data: automations } = await supabase.from("recurring_automations").select("*").eq("status", "active");
+    if (!automations?.length) return;
+    const now = new Date();
+    const currentDay = now.getDay(); // 0=Sun
+    const currentMins = now.getUTCHours() * 60 + now.getUTCMinutes();
+    // Adjust for WAT (UTC+1)
+    const watMins = (now.getUTCHours() + 1) * 60 + now.getUTCMinutes();
+
+    for (const auto of automations) {
+      // Check if today is a scheduled day
+      if (!auto.schedule_days?.includes(currentDay)) continue;
+      // Check time (within 5 min window)
+      const [h, m] = auto.schedule_time.split(":").map(Number);
+      const targetMins = h * 60 + m;
+      if (watMins < targetMins || watMins > targetMins + 5) continue;
+      // Check if already ran today
+      const today = now.toISOString().split("T")[0];
+      if (auto.last_run_at && auto.last_run_at.startsWith(today)) continue;
+
+      console.log(`[Recurring] Running "${auto.name}" (${auto.channel})`);
+
+      if (auto.channel === "whatsapp" || auto.channel === "whatsapp_group") {
+        if (auto.channel === "whatsapp_group" && auto.target_id) {
+          // Send to group directly
+          const session = sessions.get(auto.user_id);
+          if (session?.status === "connected") {
+            try { await session.sock.sendMessage(auto.target_id, { text: auto.message }); } catch (e) { console.error(`[Recurring] Group send failed:`, e.message); }
+          }
+        } else {
+          // Get phones from list or direct
+          let phones = [];
+          if (auto.target_type === "list" && auto.target_id) {
+            const { data: subs } = await supabase.from("email_subscribers").select("phone").eq("list_id", auto.target_id).eq("status", "active").not("phone", "is", null);
+            phones = (subs || []).map(s => s.phone.replace(/[\s\-\+]/g, "").replace(/^0(\d{10})$/, "234$1"));
+          } else if (auto.target_phones) {
+            phones = auto.target_phones.split(",").map(p => p.trim().replace(/[\s\-\+]/g, "").replace(/^0(\d{10})$/, "234$1"));
+          }
+          if (phones.length) {
+            await supabase.from("wa_message_queue").insert(phones.map(p => ({ user_id: auto.user_id, phone: p, message: auto.message, status: "queued", type: "recurring", campaign_id: `recurring_${auto.id}_${today}`, scheduled_at: now.toISOString() })));
+          }
+        }
+      } else if (auto.channel === "sms") {
+        // Queue SMS via sms_history or direct API call
+        let phones = [];
+        if (auto.target_type === "list" && auto.target_id) {
+          const { data: subs } = await supabase.from("email_subscribers").select("phone").eq("list_id", auto.target_id).eq("status", "active").not("phone", "is", null);
+          phones = (subs || []).map(s => s.phone.replace(/[\s\-\+]/g, "").replace(/^0(\d{10})$/, "234$1"));
+        } else if (auto.target_phones) {
+          phones = auto.target_phones.split(",").map(p => p.trim().replace(/[\s\-\+]/g, "").replace(/^0(\d{10})$/, "234$1"));
+        }
+        if (phones.length) {
+          // Insert into sms queue for the scheduled-emails function to pick up
+          await supabase.from("wa_message_queue").insert(phones.map(p => ({ user_id: auto.user_id, phone: p, message: auto.message, status: "queued", type: "recurring_sms", campaign_id: `recurring_sms_${auto.id}_${today}`, scheduled_at: now.toISOString() })));
+        }
+      } else if (auto.channel === "email") {
+        // Send email via ses-send-email function
+        let emails = [];
+        if (auto.target_type === "list" && auto.target_id) {
+          const { data: subs } = await supabase.from("email_subscribers").select("email").eq("list_id", auto.target_id).eq("status", "active");
+          emails = (subs || []).map(s => s.email);
+        }
+        if (emails.length) {
+          const sesUrl = `${SUPABASE_URL}/functions/v1/ses-send-email`;
+          try {
+            await fetch(sesUrl, {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ recipients: emails, subject: auto.subject || auto.name, htmlBody: auto.message, addUnsubscribe: true }),
+            });
+          } catch (e) { console.error(`[Recurring] Email send failed:`, e.message); }
+        }
+      }
+
+      // Mark as ran
+      await supabase.from("recurring_automations").update({ last_run_at: now.toISOString() }).eq("id", auto.id);
+      console.log(`[Recurring] Done: "${auto.name}"`);
+    }
+  } catch (err) { console.error("[Recurring]", err.message); }
+}
+
 // ─── BACKGROUND LOOPS ───
 setInterval(processQueue, 5000);
 setInterval(processCampaigns, 30000);
 setInterval(processSequences, 60000);
+setInterval(processRecurring, 60000);
 setInterval(() => { fetch(process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/` : `http://localhost:${PORT}/`).catch(() => {}); }, 4 * 60 * 1000);
 
 // ─── ROUTES ───
@@ -364,6 +449,30 @@ app.get("/sessions", auth_mw, (req, res) => {
   const list = [];
   for (const [uid, s] of sessions) list.push({ userId: uid, status: s.status, phone: s.phone });
   res.json(list);
+});
+
+app.get("/groups/:userId", auth_mw, async (req, res) => {
+  const session = sessions.get(req.params.userId);
+  if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected" });
+  try {
+    const groups = await session.sock.groupFetchAllParticipating();
+    const list = Object.values(groups).map(g => ({ id: g.id, name: g.subject, participants: g.participants?.length || 0 }));
+    res.json(list);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post("/send/group", auth_mw, async (req, res) => {
+  const { userId, groupId, message } = req.body;
+  if (!userId || !groupId || !message) return res.status(400).json({ error: "userId, groupId, message required" });
+  const session = sessions.get(userId);
+  if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected" });
+  const check = canSend(userId);
+  if (!check.ok) return res.status(429).json({ error: check.reason });
+  try {
+    await session.sock.sendMessage(groupId, { text: message });
+    recordSend(userId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 process.on("uncaughtException", (err) => console.error("[UNCAUGHT]", err.message));
