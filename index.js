@@ -228,6 +228,10 @@ async function processQueue() {
         const isGroup = msg.phone.includes("@g.us");
         const jid = isGroup ? msg.phone : msg.phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net";
         console.log(`[Queue] Sending to ${isGroup ? "group" : "individual"}: ${jid}`);
+        if (isGroup) {
+          // Fetch group metadata first to establish session
+          try { await session.sock.groupMetadata(jid); } catch {}
+        }
         await session.sock.sendMessage(jid, { text: msg.message });
         recordSend(msg.user_id);
         await supabase.from("wa_message_queue").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", msg.id);
