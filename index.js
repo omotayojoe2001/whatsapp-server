@@ -475,17 +475,19 @@ app.get("/groups/:userId", auth_mw, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get("/groups/:userId/:groupId/participants", auth_mw, async (req, res) => {
-  const session = sessions.get(req.params.userId);
+app.post("/groups/participants", auth_mw, async (req, res) => {
+  const { userId, groupId } = req.body;
+  if (!userId || !groupId) return res.status(400).json({ error: "userId and groupId required" });
+  const session = sessions.get(userId);
   if (!session || session.status !== "connected") return res.status(400).json({ error: "Session not connected" });
   try {
-    const metadata = await session.sock.groupMetadata(req.params.groupId);
+    const metadata = await session.sock.groupMetadata(groupId);
     const participants = (metadata.participants || []).map(p => {
       const id = p.id || "";
       const isLid = id.includes("@lid");
       const phone = isLid ? null : id.replace("@s.whatsapp.net", "");
       return { phone, lid: isLid ? id : null, admin: p.admin || null };
-    }).filter(p => p.phone); // Only return real phone numbers
+    }).filter(p => p.phone);
     res.json({ name: metadata.subject, participants, total: metadata.participants?.length || 0, filtered: participants.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
