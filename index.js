@@ -220,6 +220,36 @@ async function processQueue() {
     const { data: pending } = await supabase.from("wa_message_queue").select("*").eq("status", "queued").order("created_at", { ascending: true }).limit(10);
     if (!pending?.length) return;
     for (const msg of pending) {
+      // SMS messages — send via BulkSMS API, not WhatsApp
+      if (msg.type === "recurring_sms" || msg.type === "sms") {
+        try {
+          const { data: smsConfig } = await supabase.from("api_config").select("api_key").eq("service", "bulksms").single();
+          if (!smsConfig?.api_key) {
+            await supabase.from("wa_message_queue").update({ status: "failed", error_message: "BulkSMS not configured" }).eq("id", msg.id);
+            continue;
+          }
+          // Get sender ID
+          const { data: senderIdConfig } = await supabase.from("api_config").select("api_key").eq("service", "bulksms_sender_id").maybeSingle();
+          const senderId = senderIdConfig?.api_key || "GoodDeeds";
+          const smsRes = await fetch("https://www.bulksmsnigeria.com/api/v2/sms", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${smsConfig.api_key}`, "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ from: senderId, to: msg.phone, body: msg.message, gateway: "direct-refund" }),
+          });
+          const smsData = await smsRes.json().catch(() => ({}));
+          console.log(`[Queue] SMS to ${msg.phone}:`, smsRes.status, JSON.stringify(smsData).slice(0, 200));
+          if (smsRes.ok) {
+            await supabase.from("wa_message_queue").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", msg.id);
+          } else {
+            await supabase.from("wa_message_queue").update({ status: "failed", error_message: smsData.error || `HTTP ${smsRes.status}` }).eq("id", msg.id);
+          }
+        } catch (smsErr) {
+          await supabase.from("wa_message_queue").update({ status: "failed", error_message: smsErr.message }).eq("id", msg.id);
+        }
+        await new Promise(r => setTimeout(r, randomDelay()));
+        continue;
+      }
+      // WhatsApp messages
       const session = sessions.get(msg.user_id);
       if (!session || session.status !== "connected") { await supabase.from("wa_message_queue").update({ status: "failed", error_message: "Session not connected" }).eq("id", msg.id); continue; }
       const check = canSend(msg.user_id);
