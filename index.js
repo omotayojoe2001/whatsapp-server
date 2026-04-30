@@ -184,10 +184,15 @@ async function getOrCreateSession(userId) {
     }
   });
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    for (const msg of messages) {
-      if (!msg.key.fromMe && msg.key.remoteJid?.endsWith("@s.whatsapp.net")) {
-        const phone = msg.key.remoteJid.replace("@s.whatsapp.net", "");
+  sock.ev.on("messages.upsert", async ({ messages: msgs, type }) => {
+    console.log(`[MSG] Received ${msgs.length} message(s), type: ${type}`);
+    for (const msg of msgs) {
+      const fromMe = msg.key.fromMe;
+      const jid = msg.key.remoteJid || "";
+      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+      console.log(`[MSG] from=${jid} fromMe=${fromMe} text="${text.slice(0, 50)}"`);
+      if (!fromMe && jid.endsWith("@s.whatsapp.net")) {
+        const phone = jid.replace("@s.whatsapp.net", "");
         const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
         
         // Track sequence replies
