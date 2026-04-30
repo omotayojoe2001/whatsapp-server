@@ -175,8 +175,90 @@ async function getOrCreateSession(userId) {
     for (const msg of messages) {
       if (!msg.key.fromMe && msg.key.remoteJid?.endsWith("@s.whatsapp.net")) {
         const phone = msg.key.remoteJid.replace("@s.whatsapp.net", "");
+        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+        
+        // Track sequence replies
         if (supabase) {
           try { await supabase.from("wa_sequence_contacts").update({ status: "replied", has_replied: true }).eq("user_id", userId).eq("contact_phone", phone).eq("status", "active"); } catch {}
+        }
+
+        // AI Chatbot auto-reply
+        if (supabase && text) {
+          try {
+            // Check if user has an active WhatsApp chatbot
+            const { data: bot } = await supabase.from("chatbots").select("*").eq("user_id", userId).eq("platform", "whatsapp").eq("is_active", true).limit(1).single();
+            if (bot) {
+              console.log(`[Chatbot] Incoming from ${phone}: ${text.slice(0, 100)}`);
+
+              // Load conversation history (last 10 messages)
+              const { data: history } = await supabase.from("chat_messages").select("role, content").eq("chatbot_id", bot.id).eq("phone_number", phone).order("created_at", { ascending: false }).limit(10);
+              const chatHistory = (history || []).reverse().map(h => ({ role: h.role, content: h.content }));
+
+              // Save incoming message
+              await supabase.from("chat_messages").insert({ chatbot_id: bot.id, phone_number: phone, role: "user", content: text });
+
+              // Build AI prompt
+              const systemPrompt = `You are an AI customer service assistant for a business. Your name is ${bot.name}.
+
+BUSINESS INSTRUCTIONS:
+${bot.instructions}
+
+${bot.knowledge_base ? `KNOWLEDGE BASE (use this to answer questions):
+${bot.knowledge_base}
+` : ""}
+RULES:
+- Be helpful, friendly, and professional
+- Answer in the same language the customer writes in
+- Keep responses concise (max 3-4 sentences unless they ask for details)
+- If you don't know something, say so honestly and offer to connect them with a human
+- Never make up information about products, prices, or policies
+- Use WhatsApp-friendly formatting: *bold*, _italic_, no markdown headers`;
+
+              // Call AI (Groq)
+              const { data: groqConfig } = await supabase.from("api_config").select("api_key").eq("service", "groq").maybeSingle();
+              const { data: geminiConfig } = await supabase.from("api_config").select("api_key").eq("service", "gemini").maybeSingle();
+
+              let aiReply = "";
+
+              if (groqConfig?.api_key) {
+                const aiRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                  method: "POST",
+                  headers: { "Authorization": `Bearer ${groqConfig.api_key}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    model: bot.model || "llama-3.3-70b-versatile",
+                    messages: [{ role: "system", content: systemPrompt }, ...chatHistory, { role: "user", content: text }],
+                    temperature: bot.temperature || 0.7,
+                    max_tokens: 500,
+                  }),
+                });
+                const aiData = await aiRes.json();
+                aiReply = aiData.choices?.[0]?.message?.content || "";
+              } else if (geminiConfig?.api_key) {
+                const aiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiConfig.api_key}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                    contents: [...chatHistory.map(h => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.content }] })), { role: "user", parts: [{ text }] }],
+                    generationConfig: { maxOutputTokens: 500, temperature: bot.temperature || 0.7 },
+                  }),
+                });
+                const aiData = await aiRes.json();
+                aiReply = aiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+              }
+
+              if (aiReply) {
+                // Send reply
+                await sock.sendMessage(msg.key.remoteJid, { text: aiReply });
+                console.log(`[Chatbot] Replied to ${phone}: ${aiReply.slice(0, 100)}`);
+
+                // Save reply to history
+                await supabase.from("chat_messages").insert({ chatbot_id: bot.id, phone_number: phone, role: "assistant", content: aiReply });
+              }
+            }
+          } catch (chatErr) {
+            console.error(`[Chatbot] Error:`, chatErr.message);
+          }
         }
       }
     }
