@@ -163,10 +163,23 @@ async function getOrCreateSession(userId) {
         session.phone = null;
         sessions.delete(userId);
         logEvent(userId, "logged_out");
+      } else if (code === 440) {
+        // Connection replaced — another instance connected. Don't reconnect.
+        console.log(`[${userId}] Connection replaced (440), waiting...`);
+        session.status = "reconnecting";
+        // Wait longer before reconnecting to avoid loop
+        setTimeout(() => {
+          if (session.status === "reconnecting") {
+            sessions.delete(userId);
+            getOrCreateSession(userId);
+          }
+        }, 30000);
       } else {
         session.status = "reconnecting";
-        sessions.delete(userId);
-        setTimeout(() => getOrCreateSession(userId), 5000);
+        setTimeout(() => {
+          sessions.delete(userId);
+          getOrCreateSession(userId);
+        }, 5000);
       }
     }
   });
