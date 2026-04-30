@@ -163,6 +163,27 @@ async function getOrCreateSession(userId) {
         session.phone = null;
         sessions.delete(userId);
         logEvent(userId, "logged_out");
+        // Send disconnect alert email
+        if (supabase) {
+          try {
+            const { data: profile } = await supabase.from("profiles").select("full_name").eq("id", userId).single();
+            const { data: authUser } = await supabase.auth.admin.getUserById(userId);
+            const email = authUser?.user?.email;
+            if (email) {
+              const sesUrl = `${SUPABASE_URL}/functions/v1/ses-send-email`;
+              await fetch(sesUrl, {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  recipients: [email],
+                  subject: "\u26a0\ufe0f Your WhatsApp is disconnected",
+                  htmlBody: "<div style='font-family:system-ui;max-width:520px;margin:0 auto;padding:32px'><div style='background:#fef2f2;border-radius:12px;padding:20px;border-left:4px solid #dc2626'><h2 style='color:#dc2626;font-size:18px;margin:0 0 8px'>WhatsApp Disconnected</h2><p style='color:#555;font-size:14px;line-height:1.6;margin:0'>Your WhatsApp connection has been lost. Your chatbot and automations won't work until you reconnect.</p></div><div style='text-align:center;margin-top:20px'><a href='https://business.gooddeednetwork.com/settings/connect-whatsapp' style='display:inline-block;background:#dc2626;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;font-size:13px'>Reconnect Now</a></div></div>",
+                }),
+              });
+              console.log(`[${userId}] Disconnect alert email sent to ${email}`);
+            }
+          } catch (e) { console.error(`[${userId}] Disconnect email failed:`, e.message); }
+        }
       } else if (code === 440) {
         // Connection replaced — another instance connected. Don't reconnect.
         console.log(`[${userId}] Connection replaced (440), waiting...`);
