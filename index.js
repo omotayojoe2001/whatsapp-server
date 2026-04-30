@@ -191,8 +191,8 @@ async function getOrCreateSession(userId) {
       const jid = msg.key.remoteJid || "";
       const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
       console.log(`[MSG] from=${jid} fromMe=${fromMe} text="${text.slice(0, 50)}"`);
-      if (!fromMe && jid.endsWith("@s.whatsapp.net")) {
-        const phone = jid.replace("@s.whatsapp.net", "");
+      if (!fromMe && (jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid"))) {
+        const phone = jid.replace("@s.whatsapp.net", "").replace("@lid", "");
         const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
         
         // Track sequence replies
@@ -268,8 +268,8 @@ RULES:
               }
 
               if (aiReply) {
-                // Send reply
-                await sock.sendMessage(msg.key.remoteJid, { text: aiReply });
+                // Send reply using original JID (works for both @s.whatsapp.net and @lid)
+                await sock.sendMessage(jid, { text: aiReply });
                 console.log(`[Chatbot] Replied to ${phone}: ${aiReply.slice(0, 100)}`);
 
                 // Save reply to history
@@ -300,17 +300,15 @@ async function restoreSessions() {
     if (!restored) continue;
     try {
       await getOrCreateSession(userId);
-      await new Promise(r => setTimeout(r, 8000));
+      await new Promise(r => setTimeout(r, 15000));
       const s = sessions.get(userId);
-      if (s && s.status !== "connected" && s.status !== "qr_ready") {
-        console.log(`[Restore] ${userId} failed, clearing`);
-        await clearAuth(userId);
-        sessions.delete(userId);
+      if (s && s.status === "connected") {
+        console.log(`[Restore] ${userId} connected successfully`);
+      } else {
+        console.log(`[Restore] ${userId} status: ${s?.status || 'none'} — will retry on next message`);
       }
     } catch (e) {
       console.error(`[Restore] ${userId} error:`, e.message);
-      await clearAuth(userId);
-      sessions.delete(userId);
     }
   }
 }
