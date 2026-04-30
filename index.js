@@ -185,11 +185,13 @@ async function getOrCreateSession(userId) {
         // AI Chatbot auto-reply
         if (supabase && text) {
           try {
+            console.log(`[Chatbot] Message from ${phone}: "${text.slice(0, 80)}" (user: ${userId})`);
             // Check if user has an active WhatsApp chatbot
-            const { data: bot } = await supabase.from("chatbots").select("*").eq("user_id", userId).eq("platform", "whatsapp").eq("is_active", true).limit(1).single();
+            const { data: bots, error: botErr } = await supabase.from("chatbots").select("*").eq("user_id", userId).eq("platform", "whatsapp").eq("is_active", true).limit(1);
+            console.log(`[Chatbot] Bots found: ${bots?.length || 0}, error: ${botErr?.message || "none"}`);
+            const bot = bots?.[0];
             if (bot) {
-              console.log(`[Chatbot] Incoming from ${phone}: ${text.slice(0, 100)}`);
-
+              console.log(`[Chatbot] Using bot: ${bot.name} (${bot.id})`);
               // Load conversation history (last 10 messages)
               const { data: history } = await supabase.from("chat_messages").select("role, content").eq("chatbot_id", bot.id).eq("phone_number", phone).order("created_at", { ascending: false }).limit(10);
               const chatHistory = (history || []).reverse().map(h => ({ role: h.role, content: h.content }));
