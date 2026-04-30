@@ -547,11 +547,77 @@ async function processRecurring() {
   } catch (err) { console.error("[Recurring]", err.message); }
 }
 
+// ─── REMINDER PROCESSOR (every 60s) ───
+async function processReminders() {
+  if (!supabase) return;
+  try {
+    const now = new Date().toISOString();
+    // Get due reminders that haven't been notified yet
+    const { data: reminders } = await supabase
+      .from("reminders")
+      .select("*, profiles!inner(full_name)")
+      .eq("status", "pending")
+      .lte("due_date", now)
+      .is("notified_at", null)
+      .limit(10);
+
+    if (!reminders?.length) return;
+    console.log(`[Reminders] Processing ${reminders.length} due reminder(s)`);
+
+    for (const rem of reminders) {
+      // Get user email
+      const { data: authUser } = await supabase.auth.admin.getUserById(rem.user_id);
+      const email = authUser?.user?.email;
+
+      if (email && rem.send_email !== false) {
+        const sesUrl = `${SUPABASE_URL}/functions/v1/ses-send-email`;
+        try {
+          await fetch(sesUrl, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              recipients: [email],
+              subject: "\u23f0 Reminder: " + rem.title,
+              htmlBody: "<div style='font-family:system-ui;max-width:520px;margin:0 auto;padding:32px'>"
+                + "<div style='background:#fef3c7;border-radius:12px;padding:20px;border-left:4px solid #f59e0b'>"
+                + "<h2 style='color:#b45309;font-size:18px;margin:0 0 8px'>\u23f0 Reminder Due Now</h2>"
+                + "<p style='color:#333;font-size:15px;font-weight:600;margin:0 0 4px'>" + rem.title + "</p>"
+                + (rem.description ? "<p style='color:#555;font-size:13px;margin:0 0 8px'>" + rem.description + "</p>" : "")
+                + "<p style='color:#888;font-size:12px;margin:0'>Category: " + (rem.category || "General") + "</p>"
+                + "</div>"
+                + "<div style='text-align:center;margin-top:20px'>"
+                + "<a href='https://business.gooddeednetwork.com/reminders' style='display:inline-block;background:#8B5CF6;color:white;padding:10px 24px;border-radius:8px;text-decoration:none;font-size:13px'>View Reminders</a>"
+                + "</div></div>",
+            }),
+          });
+          console.log(`[Reminders] Email sent for "${rem.title}" to ${email}`);
+        } catch (e) { console.error(`[Reminders] Email failed:`, e.message); }
+      }
+
+      // Send WhatsApp if enabled
+      if (rem.send_whatsapp && rem.recipient_phone) {
+        const session = sessions.get(rem.user_id);
+        if (session?.status === "connected") {
+          try {
+            const phone = rem.recipient_phone.replace(/[\s\-\+]/g, "") + "@s.whatsapp.net";
+            await session.sock.sendMessage(phone, { text: `*\u23f0 Reminder: ${rem.title}*\n\n${rem.description || ""}\n\n_This reminder is now due._` });
+            console.log(`[Reminders] WhatsApp sent for "${rem.title}"`);
+          } catch (e) { console.error(`[Reminders] WhatsApp failed:`, e.message); }
+        }
+      }
+
+      // Mark as notified
+      await supabase.from("reminders").update({ notified_at: now, status: "sent" }).eq("id", rem.id);
+    }
+  } catch (err) { console.error("[Reminders]", err.message); }
+}
+
 // ─── BACKGROUND LOOPS ───
 setInterval(processQueue, 5000);
 setInterval(processCampaigns, 30000);
 setInterval(processSequences, 60000);
 setInterval(processRecurring, 60000);
+setInterval(processReminders, 60000);
 setInterval(() => { fetch(process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/` : `http://localhost:${PORT}/`).catch(() => {}); }, 4 * 60 * 1000);
 
 // ─── ROUTES ───
