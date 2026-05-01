@@ -1,3 +1,8 @@
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
+ffmpeg.setFfmpegPath(ffmpegPath);
+const os = require("os");
+
 const express = require("express");
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
 const QRCode = require("qrcode");
@@ -721,6 +726,84 @@ app.post("/send/group", auth_mw, async (req, res) => {
     recordSend(userId);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── VIDEO GENERATION ───
+app.post("/generate-video", async (req, res) => {
+  const scenes = [
+    { text: "Welcome to GoodDeeds Network", color: "#ffffff", accent: "#22c55e" },
+    { text: "All-in-One Business Platform", color: "#ffffff", accent: "#3b82f6" },
+    { text: "Simple. Fast. Powerful.", color: "#ffffff", accent: "#a855f7" },
+    { text: "Start Growing Today", color: "#22c55e", accent: "#22c55e" },
+  ];
+
+  const tmpDir = os.tmpdir();
+  const outputPath = path.join(tmpDir, `video_${Date.now()}.mp4`);
+
+  try {
+    // Build FFmpeg filter_complex: one drawtext per scene, each 2.5s, with fade in/out
+    // We use concat filter to join scenes
+    const sceneDuration = 2.5;
+    const fadeDuration = 0.4;
+    const fps = 30;
+
+    // Build inputs: each scene is a color source with text overlay
+    const cmd = ffmpeg();
+
+    // Each scene: black bg + text, 2.5s
+    const filterParts = [];
+    const concatInputs = [];
+
+    scenes.forEach((scene, i) => {
+      const safeText = scene.text.replace(/'/g, "\\'").replace(/:/g, "\\:");
+      const accentHex = scene.accent.replace("#", "");
+
+      // Scene filter: black background, centered text with fade
+      filterParts.push(
+        // Black background
+        `color=c=black:size=1280x720:duration=${sceneDuration}:rate=${fps}[bg${i}]`,
+        // Main text
+        `[bg${i}]drawtext=text='${safeText}':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=(h-text_h)/2:alpha='if(lt(t,${fadeDuration}),t/${fadeDuration},if(gt(t,${sceneDuration - fadeDuration}),(${sceneDuration}-t)/${fadeDuration},1))'[scene${i}]`
+      );
+      concatInputs.push(`[scene${i}]`);
+    });
+
+    // Concat all scenes
+    filterParts.push(
+      `${concatInputs.join("")}concat=n=${scenes.length}:v=1:a=0[out]`
+    );
+
+    await new Promise((resolve, reject) => {
+      cmd
+        .input("anullsrc")
+        .inputOptions(["-f", "lavfi"])
+        .complexFilter(filterParts)
+        .outputOptions([
+          "-map", "[out]",
+          "-c:v", "libx264",
+          "-preset", "fast",
+          "-crf", "23",
+          "-pix_fmt", "yuv420p",
+          "-movflags", "+faststart",
+          "-t", String(scenes.length * sceneDuration),
+        ])
+        .output(outputPath)
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", "attachment; filename=gooddeeds-ad.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { try { fs.unlinkSync(outputPath); } catch {} });
+
+  } catch (err) {
+    console.error("[Video] Error:", err.message);
+    if (fs.existsSync(outputPath)) try { fs.unlinkSync(outputPath); } catch {}
+    res.status(500).json({ error: err.message });
+  }
 });
 
 process.on("uncaughtException", (err) => console.error("[UNCAUGHT]", err.message));
