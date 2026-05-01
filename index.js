@@ -742,33 +742,57 @@ app.post("/generate-video", async (req, res) => {
   const outputPath = path.join(tmpDir, `video_${Date.now()}.mp4`);
   const listFile = path.join(tmpDir, `list_${Date.now()}.txt`);
 
+  // Find a usable font on the system
+  const fontCandidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/ttf-dejavu/DejaVuSans-Bold.ttf",
+  ];
+  const fontPath = fontCandidates.find(f => fs.existsSync(f)) || null;
+  console.log("[Video] Font:", fontPath || "none found — using default");
+
   try {
-    // Step 1: Render each scene as a separate MP4
     for (let i = 0; i < scenes.length; i++) {
       const sceneOut = path.join(tmpDir, `scene_${Date.now()}_${i}.mp4`);
       sceneFiles.push(sceneOut);
-      const safeText = scenes[i].replace(/'/g, "'").replace(/[:\[\]]/g, "\\$&");
+
+      // Escape text for FFmpeg drawtext
+      const safeText = scenes[i]
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\u2019")  // replace apostrophe with curly quote to avoid shell issues
+        .replace(/:/g, "\\:")
+        .replace(/\[/g, "\\[")
+        .replace(/\]/g, "\\]");
+
+      const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
+      const drawtext = `drawtext=text='${safeText}'${fontOpt}:fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2`;
 
       await new Promise((resolve, reject) => {
         ffmpeg()
-          .input(`color=c=black:size=1280x720:rate=30:duration=2.5`)
+          .input(`color=c=0x111111:size=1280x720:rate=25:duration=2.5`)
           .inputOptions(["-f", "lavfi"])
-          .videoFilters([
-            `drawtext=text='${safeText}':fontcolor=white:fontsize=60:x=(w-text_w)/2:y=(h-text_h)/2:alpha='if(lt(t,0.3),t/0.3,if(gt(t,2.2),(2.5-t)/0.3,1))'`,
+          .videoFilters([drawtext])
+          .outputOptions([
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-t", "2.5",
           ])
-          .outputOptions(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p"])
           .output(sceneOut)
+          .on("stderr", line => console.log("[FFmpeg]", line))
           .on("end", resolve)
-          .on("error", reject)
+          .on("error", (err) => reject(err))
           .run();
       });
     }
 
-    // Step 2: Write concat list file
-    const listContent = sceneFiles.map(f => `file '${f}'`).join("\n");
-    fs.writeFileSync(listFile, listContent);
+    // Write concat list
+    fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f}'`).join("\n"));
 
-    // Step 3: Concat all scenes into final MP4
+    // Concat scenes
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(listFile)
@@ -780,22 +804,17 @@ app.post("/generate-video", async (req, res) => {
         .run();
     });
 
-    // Step 4: Stream back to client
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Disposition", "attachment; filename=gooddeeds-ad.mp4");
     const stream = fs.createReadStream(outputPath);
     stream.pipe(res);
     stream.on("end", () => {
-      try { fs.unlinkSync(outputPath); } catch {}
-      try { fs.unlinkSync(listFile); } catch {}
-      sceneFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
+      [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
     });
 
   } catch (err) {
     console.error("[Video] Error:", err.message);
-    try { fs.unlinkSync(outputPath); } catch {}
-    try { fs.unlinkSync(listFile); } catch {}
-    sceneFiles.forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
     res.status(500).json({ error: err.message });
   }
 });
