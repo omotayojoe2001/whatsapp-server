@@ -731,68 +731,155 @@ app.post("/send/group", auth_mw, async (req, res) => {
 // ─── VIDEO GENERATION ───
 app.post("/generate-video", async (req, res) => {
   const scenes = [
-    "Welcome to GoodDeeds Network",
-    "All-in-One Business Platform",
-    "Simple. Fast. Powerful.",
-    "Start Growing Today",
+    {
+      text: "Welcome to GoodDeeds Network",
+      bg: "0x0a0a0a",         // near black
+      fontsize: 64,
+      fontcolor: "white",
+      animation: "fade",
+      motion: "zoom",
+    },
+    {
+      text: "All-in-One Business Platform",
+      bg: "0x0d1b2a",         // dark navy
+      fontsize: 58,
+      fontcolor: "0x22c55e",  // green
+      animation: "slide_left",
+      motion: "drift_up",
+    },
+    {
+      text: "Simple. Fast. Powerful.",
+      bg: "0x1a0a2e",         // dark purple
+      fontsize: 72,
+      fontcolor: "white",
+      animation: "slide_bottom",
+      motion: "zoom",
+    },
+    {
+      text: "Start Growing Today",
+      bg: "0x0a1a0a",         // dark green
+      fontsize: 66,
+      fontcolor: "0x22c55e",
+      animation: "fade",
+      motion: "drift_up",
+    },
   ];
 
+  const D = 3.0;   // scene duration seconds
+  const FPS = 25;
+  const W = 1280;
+  const H = 720;
   const tmpDir = os.tmpdir();
+  const ts = Date.now();
   const sceneFiles = [];
-  const outputPath = path.join(tmpDir, `video_${Date.now()}.mp4`);
-  const listFile = path.join(tmpDir, `list_${Date.now()}.txt`);
+  const outputPath = path.join(tmpDir, `video_${ts}.mp4`);
+  const listFile  = path.join(tmpDir, `list_${ts}.txt`);
 
-  // Find a usable font on the system
   const fontCandidates = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/ttf-dejavu/DejaVuSans-Bold.ttf",
   ];
   const fontPath = fontCandidates.find(f => fs.existsSync(f)) || null;
-  console.log("[Video] Font:", fontPath || "none found — using default");
+  console.log("[Video] Font:", fontPath || "default");
+
+  const cleanup = () => [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
 
   try {
     for (let i = 0; i < scenes.length; i++) {
-      const sceneOut = path.join(tmpDir, `scene_${Date.now()}_${i}.mp4`);
+      const sc = scenes[i];
+      const sceneOut = path.join(tmpDir, `scene_${ts}_${i}.mp4`);
       sceneFiles.push(sceneOut);
 
-      // Escape text for FFmpeg drawtext
-      const safeText = scenes[i]
+      const safeText = sc.text
         .replace(/\\/g, "\\\\")
-        .replace(/'/g, "\u2019")  // replace apostrophe with curly quote to avoid shell issues
+        .replace(/'/g, "\u2019")
         .replace(/:/g, "\\:")
         .replace(/\[/g, "\\[")
         .replace(/\]/g, "\\]");
 
       const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
-      const drawtext = `drawtext=text='${safeText}'${fontOpt}:fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2`;
+      const fade = 0.35; // fade duration
+
+      // ── Alpha expression (fade in + fade out for all animations) ──
+      const alphaExpr = `if(lt(t,${fade}),t/${fade},if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
+
+      // ── Y position based on animation ──
+      // slide_bottom: text starts below center and moves up
+      // drift_up: text slowly drifts upward while visible
+      // others: centered
+      let yExpr;
+      if (sc.animation === "slide_bottom") {
+        // slides from H to center over first 0.5s
+        yExpr = `if(lt(t,0.5),(${H}-(${H}-text_h)/2)*(1-t/0.5)+(${H}-text_h)/2*t/0.5,(${H}-text_h)/2)`;
+      } else if (sc.motion === "drift_up") {
+        // slowly drifts up 30px over full duration
+        yExpr = `(${H}-text_h)/2 - 30*(t/${D})`;
+      } else {
+        yExpr = `(${H}-text_h)/2`;
+      }
+
+      // ── X position based on animation ──
+      let xExpr;
+      if (sc.animation === "slide_left") {
+        // slides in from left edge to center over 0.5s
+        xExpr = `if(lt(t,0.5),(-text_w)*(1-t/0.5)+(${W}-text_w)/2*t/0.5,(${W}-text_w)/2)`;
+      } else {
+        xExpr = `(${W}-text_w)/2`;
+      }
+
+      // ── Scale / zoom via scale filter before drawtext ──
+      // zoom: scale from 0.92 to 1.0 over duration
+      const useZoom = sc.motion === "zoom";
+
+      // Build filter chain
+      const filters = [];
+
+      if (useZoom) {
+        // zoompan filter: slow zoom from 0.92x to 1.0x
+        filters.push(
+          `scale=${W * 2}:${H * 2}`,
+          `zoompan=z='min(zoom+0.0008,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${Math.round(D * FPS)}:s=${W}x${H}:fps=${FPS}`
+        );
+      }
+
+      filters.push(
+        `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${sc.fontsize}:x='${xExpr}':y='${yExpr}':alpha='${alphaExpr}'`
+      );
 
       await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(`color=c=0x111111:size=1280x720:rate=25:duration=2.5`)
-          .inputOptions(["-f", "lavfi"])
-          .videoFilters([drawtext])
+        const cmd = ffmpeg()
+          .input(`color=c=${sc.bg}:size=${W}x${H}:rate=${FPS}:duration=${D}`)
+          .inputOptions(["-f", "lavfi"]);
+
+        if (useZoom) {
+          // zoompan needs a real video stream — pipe through scale first
+          cmd.videoFilters(filters);
+        } else {
+          cmd.videoFilters(filters);
+        }
+
+        cmd
           .outputOptions([
             "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
+            "-preset", "fast",
+            "-crf", "23",
             "-pix_fmt", "yuv420p",
-            "-t", "2.5",
+            "-t", String(D),
           ])
           .output(sceneOut)
-          .on("stderr", line => console.log("[FFmpeg]", line))
+          .on("stderr", line => { if (line.includes("Error") || line.includes("error")) console.log("[FFmpeg]", line); })
           .on("end", resolve)
-          .on("error", (err) => reject(err))
+          .on("error", reject)
           .run();
       });
+
+      console.log(`[Video] Scene ${i + 1}/${scenes.length} done`);
     }
 
-    // Write concat list
+    // Concat
     fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f}'`).join("\n"));
-
-    // Concat scenes
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(listFile)
@@ -804,17 +891,17 @@ app.post("/generate-video", async (req, res) => {
         .run();
     });
 
+    console.log("[Video] Final MP4 ready:", outputPath);
     res.setHeader("Content-Type", "video/mp4");
     res.setHeader("Content-Disposition", "attachment; filename=gooddeeds-ad.mp4");
     const stream = fs.createReadStream(outputPath);
     stream.pipe(res);
-    stream.on("end", () => {
-      [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
-    });
+    stream.on("end", cleanup);
+    stream.on("error", cleanup);
 
   } catch (err) {
     console.error("[Video] Error:", err.message);
-    [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    cleanup();
     res.status(500).json({ error: err.message });
   }
 });
