@@ -750,56 +750,46 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   const fs_size = Math.round(sc.fontsize * fontScale);
   const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
   const fade = 0.35;
-
-  const safeText = sc.text
+  const escText = (t) => t
     .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\u2019")
+    .replace(/'/g, "’")
     .replace(/:/g, "\\:")
     .replace(/\[/g, "\\[")
     .replace(/\]/g, "\\]");
-
-  const centerY = `(${h}-text_h)/2${yOffset !== 0 ? `+${yOffset}` : ""}`;
+  const safeText = escText(sc.text);
+  const centerY = yOffset !== 0 ? `(${h}-text_h)/2+${yOffset}` : `(${h}-text_h)/2`;
   const centerX = `(${w}-text_w)/2`;
   const alphaFade = `if(lt(t,${fade}),t/${fade},if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
-
   let filters = [];
 
   if (sc.animation === "fade_up") {
-    // Text fades in while moving upward 40px
     const yExpr = `${centerY}-40*(t/${D})`;
-    filters = [
-      `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`,
-    ];
+    filters = [`drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`];
 
   } else if (sc.animation === "zoom_in") {
-    // Whole text zooms from 0.7x to 1x via scale on a padded canvas
-    // We render text at 2x canvas then zoompan down
+    const pad = Math.round(w * 0.06);
     filters = [
-      `scale=${w * 2}:${h * 2}`,
-      `zoompan=z='1.4-0.4*(t/${D})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${Math.round(D * FPS)}:s=${w}x${h}:fps=${FPS}`,
+      `pad=${w + pad * 2}:${h + pad * 2}:${pad}:${pad}:color=${sc.bg}`,
+      `crop=${w}:${h}:'${pad}*(1-t/${D})':'${pad}*(1-t/${D})'`,
       `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${centerY}':alpha='${alphaFade}'`,
     ];
 
   } else if (sc.animation === "word_by_word") {
-    // Each word appears sequentially — one drawtext per word with staggered alpha
     const words = sc.text.split(" ");
-    const wordDelay = Math.min(0.35, (D * 0.6) / words.length); // spread across 60% of duration
+    const wordDelay = Math.min(0.35, (D * 0.6) / words.length);
+    const charW = Math.round(fs_size * 0.55);
+    const spaceW = Math.round(fs_size * 0.3);
+    const wordWidths = words.map(word => word.length * charW);
+    const totalW = wordWidths.reduce((s, ww) => s + ww, 0) + spaceW * (words.length - 1);
+    let xCursor = Math.round((w - totalW) / 2);
     const wordFilters = words.map((word, idx) => {
-      const safeWord = word
-        .replace(/\\/g, "\\\\")
-        .replace(/'/g, "\u2019")
-        .replace(/:/g, "\\:")
-        .replace(/\[/g, "\\[")
-        .replace(/\]/g, "\\]");
-      const startT = idx * wordDelay;
-      const wordAlpha = `if(lt(t,${startT.toFixed(2)}),0,if(lt(t,${(startT + fade).toFixed(2)}),(t-${startT.toFixed(2)})/${fade},if(gt(t,${(D - fade).toFixed(2)}),(${D}-t)/${fade},1)))`;
-      // Position: stack words horizontally with spacing
-      // Approximate: each word offset by index * (fontsize * 0.6 * avg_chars)
-      const approxWordW = fs_size * 0.55 * word.length;
-      const totalW = words.reduce((sum, w) => sum + fs_size * 0.55 * w.length + fs_size * 0.3, 0);
-      const startX = words.slice(0, idx).reduce((sum, w) => sum + fs_size * 0.55 * w.length + fs_size * 0.3, 0);
-      const xExpr = `(${w}-${totalW.toFixed(0)})/2+${startX.toFixed(0)}`;
-      return `drawtext=text='${safeWord}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${xExpr}':y='${centerY}':alpha='${wordAlpha}'`;
+      const sw = escText(word);
+      const startT = (idx * wordDelay).toFixed(2);
+      const endFade = (idx * wordDelay + fade).toFixed(2);
+      const wordAlpha = `if(lt(t,${startT}),0,if(lt(t,${endFade}),(t-${startT})/${fade},if(gt(t,${(D - fade).toFixed(2)}),(${D}-t)/${fade},1)))`;
+      const xPos = xCursor;
+      xCursor += wordWidths[idx] + spaceW;
+      return `drawtext=text='${sw}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=${xPos}:y='${centerY}':alpha='${wordAlpha}'`;
     });
     filters = wordFilters;
   }
