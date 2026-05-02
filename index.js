@@ -767,12 +767,19 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
     filters = [`drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`];
 
   } else if (sc.animation === "zoom_in") {
-    const pad = Math.round(w * 0.06);
-    filters = [
-      `pad=${w + pad * 2}:${h + pad * 2}:${pad}:${pad}:color=${sc.bg}`,
-      `crop=${w}:${h}:'${pad}*(1-t/${D})':'${pad}*(1-t/${D})'`,
-      `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${centerY}':alpha='${alphaFade}'`,
-    ];
+    // Only use pad+crop zoom for square (1080x1080). Larger formats use fade_up to avoid SIGKILL.
+    if (w <= 1080 && h <= 1080) {
+      const pad = Math.round(w * 0.05);
+      filters = [
+        `pad=${w + pad * 2}:${h + pad * 2}:${pad}:${pad}:color=${sc.bg}`,
+        `crop=${w}:${h}:'${pad}*(1-t/${D})':'${pad}*(1-t/${D})'`,
+        `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${centerY}':alpha='${alphaFade}'`,
+      ];
+    } else {
+      // Fallback for large frames: simple fade_up (no heavy filter)
+      const yExpr = `${centerY}-30*(t/${D})`;
+      filters = [`drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`];
+    }
 
   } else if (sc.animation === "word_by_word") {
     const words = sc.text.split(" ");
@@ -799,7 +806,7 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
       .input(`color=c=${sc.bg}:size=${w}x${h}:rate=${FPS}:duration=${D}`)
       .inputOptions(["-f", "lavfi"])
       .videoFilters(filters)
-      .outputOptions(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-t", String(D)])
+      .outputOptions(["-c:v", "libx264", "-preset", (w > 1080 || h > 1080) ? "ultrafast" : "fast", "-crf", "26", "-pix_fmt", "yuv420p", "-t", String(D)])
       .output(sceneOut)
       .on("stderr", line => { if (line.includes("Error")) console.log("[FFmpeg]", line); })
       .on("end", resolve)
@@ -812,7 +819,7 @@ app.post("/generate-video", async (req, res) => {
   const formatKey = (req.body?.format || "landscape");
   const fmt = VIDEO_FORMATS[formatKey] || VIDEO_FORMATS.landscape;
   const D = 3.0;
-  const FPS = 25;
+  const FPS = (fmt.w > 1080 || fmt.h > 1080) ? 24 : 25;
 
   const tmpDir = os.tmpdir();
   const ts = Date.now();
