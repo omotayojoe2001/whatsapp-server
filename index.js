@@ -729,51 +729,106 @@ app.post("/send/group", auth_mw, async (req, res) => {
 });
 
 // ─── VIDEO GENERATION ───
-app.post("/generate-video", async (req, res) => {
-  const scenes = [
-    {
-      text: "Welcome to GoodDeeds Network",
-      bg: "0x0a0a0a",         // near black
-      fontsize: 64,
-      fontcolor: "white",
-      animation: "fade",
-      motion: "zoom",
-    },
-    {
-      text: "All-in-One Business Platform",
-      bg: "0x0d1b2a",         // dark navy
-      fontsize: 58,
-      fontcolor: "0x22c55e",  // green
-      animation: "slide_left",
-      motion: "drift_up",
-    },
-    {
-      text: "Simple. Fast. Powerful.",
-      bg: "0x1a0a2e",         // dark purple
-      fontsize: 72,
-      fontcolor: "white",
-      animation: "slide_bottom",
-      motion: "zoom",
-    },
-    {
-      text: "Start Growing Today",
-      bg: "0x0a1a0a",         // dark green
-      fontsize: 66,
-      fontcolor: "0x22c55e",
-      animation: "fade",
-      motion: "drift_up",
-    },
-  ];
 
-  const D = 3.0;   // scene duration seconds
+// Format configs
+const VIDEO_FORMATS = {
+  landscape: { w: 1920, h: 1080, fontScale: 1.0,  yOffset: 0    },
+  square:    { w: 1080, h: 1080, fontScale: 0.85, yOffset: 0    },
+  portrait:  { w: 1080, h: 1920, fontScale: 0.85, yOffset: -120 }, // slightly above center
+};
+
+// Scene definitions
+const VIDEO_SCENES = [
+  { text: "Welcome to GoodDeeds Network",  bg: "0x0a0a0a", fontsize: 64, fontcolor: "white",    animation: "fade_up"   },
+  { text: "All-in-One Business Platform",  bg: "0x0d1b2a", fontsize: 58, fontcolor: "0x22c55e", animation: "word_by_word" },
+  { text: "Simple. Fast. Powerful.",        bg: "0x1a0a2e", fontsize: 72, fontcolor: "white",    animation: "zoom_in"   },
+  { text: "Start Growing Today",            bg: "0x0a1a0a", fontsize: 66, fontcolor: "0x22c55e", animation: "fade_up"   },
+];
+
+async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
+  const { w, h, fontScale, yOffset } = fmt;
+  const fs_size = Math.round(sc.fontsize * fontScale);
+  const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
+  const fade = 0.35;
+
+  const safeText = sc.text
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\u2019")
+    .replace(/:/g, "\\:")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
+
+  const centerY = `(${h}-text_h)/2${yOffset !== 0 ? `+${yOffset}` : ""}`;
+  const centerX = `(${w}-text_w)/2`;
+  const alphaFade = `if(lt(t,${fade}),t/${fade},if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
+
+  let filters = [];
+
+  if (sc.animation === "fade_up") {
+    // Text fades in while moving upward 40px
+    const yExpr = `${centerY}-40*(t/${D})`;
+    filters = [
+      `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`,
+    ];
+
+  } else if (sc.animation === "zoom_in") {
+    // Whole text zooms from 0.7x to 1x via scale on a padded canvas
+    // We render text at 2x canvas then zoompan down
+    filters = [
+      `scale=${w * 2}:${h * 2}`,
+      `zoompan=z='1.4-0.4*(t/${D})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${Math.round(D * FPS)}:s=${w}x${h}:fps=${FPS}`,
+      `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${centerY}':alpha='${alphaFade}'`,
+    ];
+
+  } else if (sc.animation === "word_by_word") {
+    // Each word appears sequentially — one drawtext per word with staggered alpha
+    const words = sc.text.split(" ");
+    const wordDelay = Math.min(0.35, (D * 0.6) / words.length); // spread across 60% of duration
+    const wordFilters = words.map((word, idx) => {
+      const safeWord = word
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\u2019")
+        .replace(/:/g, "\\:")
+        .replace(/\[/g, "\\[")
+        .replace(/\]/g, "\\]");
+      const startT = idx * wordDelay;
+      const wordAlpha = `if(lt(t,${startT.toFixed(2)}),0,if(lt(t,${(startT + fade).toFixed(2)}),(t-${startT.toFixed(2)})/${fade},if(gt(t,${(D - fade).toFixed(2)}),(${D}-t)/${fade},1)))`;
+      // Position: stack words horizontally with spacing
+      // Approximate: each word offset by index * (fontsize * 0.6 * avg_chars)
+      const approxWordW = fs_size * 0.55 * word.length;
+      const totalW = words.reduce((sum, w) => sum + fs_size * 0.55 * w.length + fs_size * 0.3, 0);
+      const startX = words.slice(0, idx).reduce((sum, w) => sum + fs_size * 0.55 * w.length + fs_size * 0.3, 0);
+      const xExpr = `(${w}-${totalW.toFixed(0)})/2+${startX.toFixed(0)}`;
+      return `drawtext=text='${safeWord}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${xExpr}':y='${centerY}':alpha='${wordAlpha}'`;
+    });
+    filters = wordFilters;
+  }
+
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(`color=c=${sc.bg}:size=${w}x${h}:rate=${FPS}:duration=${D}`)
+      .inputOptions(["-f", "lavfi"])
+      .videoFilters(filters)
+      .outputOptions(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-t", String(D)])
+      .output(sceneOut)
+      .on("stderr", line => { if (line.includes("Error")) console.log("[FFmpeg]", line); })
+      .on("end", resolve)
+      .on("error", reject)
+      .run();
+  });
+}
+
+app.post("/generate-video", async (req, res) => {
+  const formatKey = (req.body?.format || "landscape");
+  const fmt = VIDEO_FORMATS[formatKey] || VIDEO_FORMATS.landscape;
+  const D = 3.0;
   const FPS = 25;
-  const W = 1280;
-  const H = 720;
+
   const tmpDir = os.tmpdir();
   const ts = Date.now();
   const sceneFiles = [];
   const outputPath = path.join(tmpDir, `video_${ts}.mp4`);
-  const listFile  = path.join(tmpDir, `list_${ts}.txt`);
+  const listFile   = path.join(tmpDir, `list_${ts}.txt`);
 
   const fontCandidates = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -782,103 +837,16 @@ app.post("/generate-video", async (req, res) => {
     "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
   ];
   const fontPath = fontCandidates.find(f => fs.existsSync(f)) || null;
-  console.log("[Video] Font:", fontPath || "default");
-
   const cleanup = () => [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
 
   try {
-    for (let i = 0; i < scenes.length; i++) {
-      const sc = scenes[i];
+    for (let i = 0; i < VIDEO_SCENES.length; i++) {
       const sceneOut = path.join(tmpDir, `scene_${ts}_${i}.mp4`);
       sceneFiles.push(sceneOut);
-
-      const safeText = sc.text
-        .replace(/\\/g, "\\\\")
-        .replace(/'/g, "\u2019")
-        .replace(/:/g, "\\:")
-        .replace(/\[/g, "\\[")
-        .replace(/\]/g, "\\]");
-
-      const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
-      const fade = 0.35; // fade duration
-
-      // ── Alpha expression (fade in + fade out for all animations) ──
-      const alphaExpr = `if(lt(t,${fade}),t/${fade},if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
-
-      // ── Y position based on animation ──
-      // slide_bottom: text starts below center and moves up
-      // drift_up: text slowly drifts upward while visible
-      // others: centered
-      let yExpr;
-      if (sc.animation === "slide_bottom") {
-        // slides from H to center over first 0.5s
-        yExpr = `if(lt(t,0.5),(${H}-(${H}-text_h)/2)*(1-t/0.5)+(${H}-text_h)/2*t/0.5,(${H}-text_h)/2)`;
-      } else if (sc.motion === "drift_up") {
-        // slowly drifts up 30px over full duration
-        yExpr = `(${H}-text_h)/2 - 30*(t/${D})`;
-      } else {
-        yExpr = `(${H}-text_h)/2`;
-      }
-
-      // ── X position based on animation ──
-      let xExpr;
-      if (sc.animation === "slide_left") {
-        // slides in from left edge to center over 0.5s
-        xExpr = `if(lt(t,0.5),(-text_w)*(1-t/0.5)+(${W}-text_w)/2*t/0.5,(${W}-text_w)/2)`;
-      } else {
-        xExpr = `(${W}-text_w)/2`;
-      }
-
-      // ── Scale / zoom via scale filter before drawtext ──
-      // zoom: scale from 0.92 to 1.0 over duration
-      const useZoom = sc.motion === "zoom";
-
-      // Build filter chain
-      const filters = [];
-
-      if (useZoom) {
-        // zoompan filter: slow zoom from 0.92x to 1.0x
-        filters.push(
-          `scale=${W * 2}:${H * 2}`,
-          `zoompan=z='min(zoom+0.0008,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${Math.round(D * FPS)}:s=${W}x${H}:fps=${FPS}`
-        );
-      }
-
-      filters.push(
-        `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${sc.fontsize}:x='${xExpr}':y='${yExpr}':alpha='${alphaExpr}'`
-      );
-
-      await new Promise((resolve, reject) => {
-        const cmd = ffmpeg()
-          .input(`color=c=${sc.bg}:size=${W}x${H}:rate=${FPS}:duration=${D}`)
-          .inputOptions(["-f", "lavfi"]);
-
-        if (useZoom) {
-          // zoompan needs a real video stream — pipe through scale first
-          cmd.videoFilters(filters);
-        } else {
-          cmd.videoFilters(filters);
-        }
-
-        cmd
-          .outputOptions([
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-t", String(D),
-          ])
-          .output(sceneOut)
-          .on("stderr", line => { if (line.includes("Error") || line.includes("error")) console.log("[FFmpeg]", line); })
-          .on("end", resolve)
-          .on("error", reject)
-          .run();
-      });
-
-      console.log(`[Video] Scene ${i + 1}/${scenes.length} done`);
+      await renderScene(VIDEO_SCENES[i], fmt, sceneOut, fontPath, D, FPS);
+      console.log(`[Video] Scene ${i + 1}/${VIDEO_SCENES.length} (${formatKey}) done`);
     }
 
-    // Concat
     fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f}'`).join("\n"));
     await new Promise((resolve, reject) => {
       ffmpeg()
@@ -891,9 +859,9 @@ app.post("/generate-video", async (req, res) => {
         .run();
     });
 
-    console.log("[Video] Final MP4 ready:", outputPath);
+    console.log(`[Video] Done: ${formatKey} ${fmt.w}x${fmt.h}`);
     res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Content-Disposition", "attachment; filename=gooddeeds-ad.mp4");
+    res.setHeader("Content-Disposition", `attachment; filename=gooddeeds-${formatKey}.mp4`);
     const stream = fs.createReadStream(outputPath);
     stream.pipe(res);
     stream.on("end", cleanup);
