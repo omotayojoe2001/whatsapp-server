@@ -837,21 +837,22 @@ async function fetchPixabayMusic() {
 }
 
 
-// ─── PIXABAY MUSIC FETCH ───
+// ─── JAMENDO MUSIC FETCH ───
 async function fetchPixabayMusic() {
-  const key = process.env.PIXABAY_API_KEY || "55700466-152b17378ca052da54a0afb72";
-  const queries = ["corporate background", "motivational upbeat", "ambient business"];
-  const q = queries[Math.floor(Math.random() * queries.length)];
+  const clientId = process.env.JAMENDO_CLIENT_ID || "3ff88d7b";
+  const tags = ["background", "corporate", "ambient", "motivational"];
+  const tag = tags[Math.floor(Math.random() * tags.length)];
   try {
-    const url = `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(q)}&category=music&per_page=20&safesearch=true`;
+    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&audioformat=mp32&include=musicinfo&boost=popularity_total`;
     const res = await fetch(url);
     const data = await res.json();
-    const hits = (data.hits || []).filter(h => h.previewURL);
-    if (!hits.length) return null;
-    const hit = hits[Math.floor(Math.random() * Math.min(hits.length, 10))];
-    return hit.previewURL || null;
+    const tracks = (data.results || []).filter(t => t.audio);
+    if (!tracks.length) return null;
+    const track = tracks[Math.floor(Math.random() * Math.min(tracks.length, 10))];
+    console.log(`[Music] Track: "${track.name}" by ${track.artist_name}`);
+    return track.audio;
   } catch (e) {
-    console.log("[Music] Fetch failed:", e.message);
+    console.log("[Music] Jamendo fetch failed:", e.message);
     return null;
   }
 }
