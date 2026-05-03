@@ -967,6 +967,286 @@ app.post("/generate-video", async (req, res) => {
   }
 });
 
+
+// ─── VIDEO TYPE 1: KINETIC TYPOGRAPHY ───
+app.post("/generate-video/kinetic", async (req, res) => {
+  const { text = "GoodDeeds Network", format = "square" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
+  const { w, h } = fmt;
+  const D = 4.0; const FPS = 25;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const outputPath = path.join(tmpDir, `kinetic_${ts}.mp4`);
+  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
+  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
+  const words = text.split(" ");
+  const charW = Math.round(60 * 0.55);
+  const spaceW = Math.round(60 * 0.3);
+  const wordWidths = words.map(w => w.length * charW);
+  const totalW = wordWidths.reduce((s,ww)=>s+ww,0) + spaceW*(words.length-1);
+  let xCursor = Math.round((w - totalW) / 2);
+  const wordDelay = 0.4;
+  const filters = words.map((word, idx) => {
+    const sw = word.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const startT = (idx * wordDelay).toFixed(2);
+    const endT = (idx * wordDelay + 0.3).toFixed(2);
+    // Each word slides in from below with scale effect
+    const yExpr = `if(lt(t,${startT}),${h},if(lt(t,${endT}),${h}-((${h}-((${h}-text_h)/2))*(t-${startT})/0.3),(${h}-text_h)/2))`;
+    const alpha = `if(lt(t,${startT}),0,if(lt(t,${endT}),(t-${startT})/0.3,if(gt(t,${(D-0.4).toFixed(2)}),(${D}-t)/0.4,1)))`;
+    const xPos = xCursor; xCursor += wordWidths[idx] + spaceW;
+    return `drawtext=text='${sw}'${fontOpt}:fontcolor=white:fontsize=60:x=${xPos}:y='${yExpr}':alpha='${alpha}'`;
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(`color=c=0x0d0d0d:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
+        .videoFilters(filters)
+        .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
+        .output(outputPath).on("end",resolve).on("error",reject).run();
+    });
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=kinetic.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
+  } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
+});
+
+// ─── VIDEO TYPE 2: DATA VISUALIZATION ───
+app.post("/generate-video/data-viz", async (req, res) => {
+  const { title = "Your Growth This Month", stats = [{label:"Emails Sent",value:450,max:500},{label:"SMS Sent",value:120,max:200},{label:"Revenue",value:75,max:100}], format = "landscape" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
+  const { w, h } = fmt;
+  const D = 5.0; const FPS = 25;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const outputPath = path.join(tmpDir, `dataviz_${ts}.mp4`);
+  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
+  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
+  const barH = Math.round(h * 0.08);
+  const barMaxW = Math.round(w * 0.6);
+  const startX = Math.round(w * 0.2);
+  const startY = Math.round(h * 0.3);
+  const gap = Math.round(h * 0.18);
+  const animDur = 1.5;
+  const filters = [
+    `drawtext=text='${title.replace(/'/g,"’")}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.055)}:x=(w-text_w)/2:y=${Math.round(h*0.1)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+  ];
+  stats.forEach((stat, idx) => {
+    const y = startY + idx * gap;
+    const pct = Math.min(stat.value / stat.max, 1);
+    const barW = Math.round(barMaxW * pct);
+    const delay = 0.5 + idx * 0.4;
+    // Animated bar growing from left
+    filters.push(`drawbox=x=${startX}:y=${y}:w='${barMaxW}':h=${barH}:color=0x333333:t=fill`);
+    filters.push(`drawbox=x=${startX}:y=${y}:w='if(lt(t,${delay}),0,min(${barW}*(t-${delay})/${animDur},${barW}))':h=${barH}:color=0x22c55e:t=fill`);
+    filters.push(`drawtext=text='${stat.label.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${Math.round(h*0.035)}:x=${startX}:y=${y-Math.round(h*0.045)}:alpha='if(lt(t,${delay}),0,1)'`);
+    filters.push(`drawtext=text='${stat.value}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.04)}:x=${startX+barW+10}:y=${y+Math.round(barH*0.1)}:alpha='if(lt(t,${(delay+animDur).toFixed(1)}),0,1)'`);
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(`color=c=0x0a0a1a:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
+        .videoFilters(filters)
+        .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
+        .output(outputPath).on("end",resolve).on("error",reject).run();
+    });
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=dataviz.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
+  } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
+});
+
+// ─── VIDEO TYPE 3: SPLIT SCREEN ───
+app.post("/generate-video/split-screen", async (req, res) => {
+  const { leftText = "Before GoodDeeds", rightText = "After GoodDeeds", leftSub = "Scattered tools\nWasted time\nNo insights", rightSub = "One dashboard\nFull automation\nReal results", format = "landscape" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
+  const { w, h } = fmt;
+  const D = 5.0; const FPS = 25;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const outputPath = path.join(tmpDir, `split_${ts}.mp4`);
+  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
+  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
+  const half = Math.round(w / 2);
+  const fs2 = Math.round(h * 0.055);
+  const fs3 = Math.round(h * 0.038);
+  const filters = [
+    // Left panel background
+    `drawbox=x=0:y=0:w=${half}:h=${h}:color=0x1a0a0a:t=fill`,
+    // Right panel background
+    `drawbox=x=${half}:y=0:w=${half}:h=${h}:color=0x0a1a0a:t=fill`,
+    // Divider line
+    `drawbox=x=${half-1}:y=0:w=2:h=${h}:color=0x444444:t=fill`,
+    // Left title
+    `drawtext=text='${leftText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xff6b6b:fontsize=${fs2}:x=${Math.round(half*0.5)-100}:y=${Math.round(h*0.2)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+    // Right title
+    `drawtext=text='${rightText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0x22c55e:fontsize=${fs2}:x=${half+Math.round(half*0.5)-100}:y=${Math.round(h*0.2)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
+    // Left sub lines
+    ...leftSub.split("\n").map((line, i) =>
+      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${fs3}:x=${Math.round(half*0.1)}:y=${Math.round(h*0.38)+i*Math.round(h*0.1)}:alpha='if(lt(t,${0.6+i*0.2}),0,if(lt(t,${0.9+i*0.2}),(t-${0.6+i*0.2})/0.3,1))'`
+    ),
+    // Right sub lines
+    ...rightSub.split("\n").map((line, i) =>
+      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=white:fontsize=${fs3}:x=${half+Math.round(half*0.1)}:y=${Math.round(h*0.38)+i*Math.round(h*0.1)}:alpha='if(lt(t,${0.8+i*0.2}),0,if(lt(t,${1.1+i*0.2}),(t-${0.8+i*0.2})/0.3,1))'`
+    ),
+  ];
+  try {
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(`color=c=0x111111:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
+        .videoFilters(filters)
+        .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
+        .output(outputPath).on("end",resolve).on("error",reject).run();
+    });
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=split-screen.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
+  } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
+});
+
+// ─── VIDEO TYPE 4: SUBTITLE/CAPTION STYLE ───
+app.post("/generate-video/subtitle", async (req, res) => {
+  const { lines = ["GoodDeeds Network","All your business tools","In one place","Email. SMS. WhatsApp.","Invoices. Social. AI.","Start free today."], format = "portrait" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.portrait;
+  const { w, h } = fmt;
+  const lineD = 1.8; const D = lines.length * lineD; const FPS = 25;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const sceneFiles = []; const listFile = path.join(tmpDir, `list_${ts}.txt`);
+  const outputPath = path.join(tmpDir, `subtitle_${ts}.mp4`);
+  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
+  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
+  const bgs = ["0x0a0a0a","0x0d1b2a","0x1a0a2e","0x0a1a0a","0x1a1a0a","0x0a0a1a"];
+  try {
+    for (let i = 0; i < lines.length; i++) {
+      const sceneOut = path.join(tmpDir, `sub_${ts}_${i}.mp4`);
+      sceneFiles.push(sceneOut);
+      const safe = lines[i].replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+      const yPos = Math.round(h * 0.72);
+      const filters = [
+        `drawbox=x=0:y=${yPos-20}:w=${w}:h=${Math.round(h*0.12)}:color=0x000000@0.7:t=fill`,
+        `drawtext=text='${safe}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.048)}:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.2),t/0.2,if(gt(t,${lineD-0.2}),(${lineD}-t)/0.2,1))'`,
+      ];
+      await new Promise((resolve, reject) => {
+        ffmpeg().input(`color=c=${bgs[i%bgs.length]}:size=${w}x${h}:rate=${FPS}:duration=${lineD}`).inputOptions(["-f","lavfi"])
+          .videoFilters(filters)
+          .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(lineD)])
+          .output(sceneOut).on("end",resolve).on("error",reject).run();
+      });
+    }
+    fs.writeFileSync(listFile, sceneFiles.map(f=>`file '${f}'`).join("\n"));
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listFile).inputOptions(["-f","concat","-safe","0"])
+        .outputOptions(["-c","copy","-movflags","+faststart"])
+        .output(outputPath).on("end",resolve).on("error",reject).run();
+    });
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=subtitle.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+  } catch(err) { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
+});
+
+// ─── VIDEO TYPE 5: REAL VIDEO BACKGROUND + TEXT OVERLAY ───
+app.post("/generate-video/video-bg", async (req, res) => {
+  const { scenes: customScenes, format = "landscape" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
+  const { w, h } = fmt;
+  const D = 3.0; const FPS = 25;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const bgVideoUrl = "https://cdn.pixabay.com/video/2020/07/30/46207-447087782_medium.mp4";
+  const bgPath = path.join(tmpDir, `bg_${ts}.mp4`);
+  const outputPath = path.join(tmpDir, `videobg_${ts}.mp4`);
+  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
+  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
+  const scenes = customScenes || VIDEO_SCENES;
+  const totalD = scenes.length * D;
+  try {
+    // Download background video
+    const bgRes = await fetch(bgVideoUrl);
+    const bgBuf = await bgRes.arrayBuffer();
+    fs.writeFileSync(bgPath, Buffer.from(bgBuf));
+    console.log(`[VideoBG] Downloaded ${Math.round(bgBuf.byteLength/1024)}KB`);
+    // Build text overlays for all scenes
+    const filters = [
+      // Scale bg to fit, loop it, darken overlay
+      `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},loop=-1:size=${Math.round(totalD*FPS)},trim=0:${totalD},setpts=PTS-STARTPTS`,
+      `drawbox=x=0:y=0:w=${w}:h=${h}:color=0x000000@0.55:t=fill`,
+    ];
+    scenes.forEach((sc, idx) => {
+      const tStart = idx * D;
+      const tEnd = tStart + D;
+      const safe = sc.text.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+      const alpha = `if(lt(t,${tStart}),0,if(lt(t,${(tStart+0.4).toFixed(1)}),(t-${tStart})/0.4,if(gt(t,${(tEnd-0.4).toFixed(1)}),(${tEnd}-t)/0.4,1)))`;
+      filters.push(`drawtext=text='${safe}'${fontOpt}:fontcolor=${sc.fontcolor||"white"}:fontsize=${Math.round((sc.fontsize||60)*fmt.fontScale)}:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${alpha}'`);
+    });
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(bgPath)
+        .videoFilters(filters)
+        .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-an","-t",String(totalD)])
+        .output(outputPath).on("end",resolve).on("error",reject).run();
+    });
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=video-bg.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+  } catch(err) { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
+});
+
+// ─── VIDEO TYPE 6: PRODUCT SHOWCASE ───
+app.post("/generate-video/product", async (req, res) => {
+  const { productName = "Premium Business Suite", price = "₦15,000/mo", cta = "Start Free Today", imageUrl = "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=800&q=80", format = "square" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
+  const { w, h } = fmt;
+  const D = 5.0; const FPS = 25;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const imgPath = path.join(tmpDir, `product_img_${ts}.jpg`);
+  const outputPath = path.join(tmpDir, `product_${ts}.mp4`);
+  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
+  const fontFile = fontCandidates.find(f => fs.existsSync(f)) || null;
+  const fontOpt = fontFile ? `:fontfile=${fontFile}` : "";
+  try {
+    // Download product image
+    const imgRes = await fetch(imageUrl);
+    const imgBuf = await imgRes.arrayBuffer();
+    fs.writeFileSync(imgPath, Buffer.from(imgBuf));
+    const imgW = Math.round(w * 0.55); const imgH = Math.round(h * 0.5);
+    const imgX = Math.round((w - imgW) / 2); const imgY = Math.round(h * 0.08);
+    const textY = Math.round(h * 0.65);
+    const safeProduct = productName.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const safePrice = price.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const safeCta = cta.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    // Build filter: bg + image overlay + text
+    const filterComplex = [
+      // Scale product image
+      `[1:v]scale=${imgW}:${imgH}:force_original_aspect_ratio=decrease,pad=${imgW}:${imgH}:(ow-iw)/2:(oh-ih)/2:color=0x00000000[img]`,
+      // Overlay image on background with fade-in
+      `[0:v][img]overlay=x=${imgX}:y=${imgY}:enable='between(t,0,${D})':alpha=1[v1]`,
+      // Product name
+      `[v1]drawtext=text='${safeProduct}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.055)}:x=(w-text_w)/2:y=${textY}:alpha='if(lt(t,0.5),t/0.5,1)'[v2]`,
+      // Price
+      `[v2]drawtext=text='${safePrice}'${fontOpt}:fontcolor=0x22c55e:fontsize=${Math.round(h*0.065)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.09)}:alpha='if(lt(t,0.8),0,if(lt(t,1.1),(t-0.8)/0.3,1))'[v3]`,
+      // CTA button style
+      `[v3]drawbox=x=(w-${Math.round(w*0.5)})/2:y=${textY+Math.round(h*0.2)}:w=${Math.round(w*0.5)}:h=${Math.round(h*0.08)}:color=0x22c55e:t=fill[v4]`,
+      `[v4]drawtext=text='${safeCta}'${fontOpt}:fontcolor=black:fontsize=${Math.round(h*0.04)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.225)}:alpha='if(lt(t,1.2),0,if(lt(t,1.5),(t-1.2)/0.3,1))'`,
+    ];
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(`color=c=0x111111:size=${w}x${h}:rate=${FPS}:duration=${D}`)
+        .inputOptions(["-f","lavfi"])
+        .input(imgPath)
+        .complexFilter(filterComplex)
+        .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
+        .output(outputPath).on("end",resolve).on("error",reject).run();
+    });
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=product.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+  } catch(err) { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
+});
+
 process.on("uncaughtException", (err) => console.error("[UNCAUGHT]", err.message));
 process.on("unhandledRejection", (err) => console.error("[UNHANDLED]", err));
 
