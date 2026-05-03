@@ -968,6 +968,43 @@ app.post("/generate-video", async (req, res) => {
 });
 
 
+
+// ─── SHARED: Mix music into a silent video and stream response ──
+async function mixMusicAndSend(silentPath, outputPath, totalDuration, res, filename, cleanup) {
+  const musicUrl = await fetchPixabayMusic();
+  if (musicUrl) {
+    const musicPath = silentPath.replace('.mp4', '_music.mp3');
+    try {
+      const musicRes = await fetch(musicUrl);
+      if (musicRes.ok) {
+        const buf = await musicRes.arrayBuffer();
+        fs.writeFileSync(musicPath, Buffer.from(buf));
+        await new Promise((resolve) => {
+          ffmpeg()
+            .input(silentPath)
+            .input(musicPath)
+            .complexFilter([`[1:a]volume=0.15,atrim=0:${totalDuration},asetpts=PTS-STARTPTS[aout]`])
+            .outputOptions(["-map","0:v","-map","[aout]","-c:v","copy","-c:a","aac","-b:a","128k","-shortest","-movflags","+faststart"])
+            .output(outputPath)
+            .on("end", resolve)
+            .on("error", () => { try{fs.copyFileSync(silentPath,outputPath);}catch{} resolve(); })
+            .run();
+        });
+        try{fs.unlinkSync(musicPath);}catch{}
+      } else { fs.copyFileSync(silentPath, outputPath); }
+    } catch(e) { console.log("[Music] failed:", e.message); try{fs.copyFileSync(silentPath,outputPath);}catch{} }
+  } else {
+    fs.copyFileSync(silentPath, outputPath);
+  }
+  try{fs.unlinkSync(silentPath);}catch{}
+  res.setHeader("Content-Type","video/mp4");
+  res.setHeader("Content-Disposition",`attachment; filename=${filename}`);
+  const stream = fs.createReadStream(outputPath);
+  stream.pipe(res);
+  stream.on("end", cleanup);
+  stream.on("error", cleanup);
+}
+
 // ─── VIDEO TYPE 1: KINETIC TYPOGRAPHY ───
 app.post("/generate-video/kinetic", async (req, res) => {
   const { text = "GoodDeeds Network", format = "square" } = req.body || {};
@@ -985,15 +1022,16 @@ app.post("/generate-video/kinetic", async (req, res) => {
   const totalW = wordWidths.reduce((s,ww)=>s+ww,0) + spaceW*(words.length-1);
   let xCursor = Math.round((w - totalW) / 2);
   const wordDelay = 0.4;
+  const colors = ["white","0x22c55e","0x60a5fa","white","0xa78bfa","0xfbbf24"];
   const filters = words.map((word, idx) => {
     const sw = word.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
     const startT = (idx * wordDelay).toFixed(2);
-    const endT = (idx * wordDelay + 0.3).toFixed(2);
-    // Each word slides in from below with scale effect
-    const yExpr = `if(lt(t,${startT}),${h},if(lt(t,${endT}),${h}-((${h}-((${h}-text_h)/2))*(t-${startT})/0.3),(${h}-text_h)/2))`;
-    const alpha = `if(lt(t,${startT}),0,if(lt(t,${endT}),(t-${startT})/0.3,if(gt(t,${(D-0.4).toFixed(2)}),(${D}-t)/0.4,1)))`;
+    const endT = (idx * wordDelay + 0.4).toFixed(2);
+    const yExpr = `if(lt(t,${startT}),${h},if(lt(t,${endT}),${h}-((${h}-((${h}-text_h)/2))*(t-${startT})/0.4),(${h}-text_h)/2))`;
+    const alpha = `if(lt(t,${startT}),0,if(lt(t,${endT}),(t-${startT})/0.4,if(gt(t,${(D-0.5).toFixed(2)}),(${D}-t)/0.5,1)))`;
+    const color = colors[idx % colors.length];
     const xPos = xCursor; xCursor += wordWidths[idx] + spaceW;
-    return `drawtext=text='${sw}'${fontOpt}:fontcolor=white:fontsize=60:x=${xPos}:y='${yExpr}':alpha='${alpha}'`;
+    return `drawtext=text='${sw}'${fontOpt}:fontcolor=${color}:fontsize=${Math.round(h*0.07)}:x=${xPos}:y='${yExpr}':alpha='${alpha}'`;
   });
   try {
     await new Promise((resolve, reject) => {
@@ -1002,11 +1040,9 @@ app.post("/generate-video/kinetic", async (req, res) => {
         .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
         .output(outputPath).on("end",resolve).on("error",reject).run();
     });
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition","attachment; filename=kinetic.mp4");
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
+    const silentK = outputPath.replace('.mp4','_s.mp4');
+    fs.renameSync(outputPath, silentK);
+    await mixMusicAndSend(silentK, outputPath, D, res, 'kinetic.mp4', () => { try{fs.unlinkSync(outputPath);}catch{} });
   } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
 });
 
@@ -1047,11 +1083,9 @@ app.post("/generate-video/data-viz", async (req, res) => {
         .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
         .output(outputPath).on("end",resolve).on("error",reject).run();
     });
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition","attachment; filename=dataviz.mp4");
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
+    const silentD = outputPath.replace('.mp4','_s.mp4');
+    fs.renameSync(outputPath, silentD);
+    await mixMusicAndSend(silentD, outputPath, D, res, 'dataviz.mp4', () => { try{fs.unlinkSync(outputPath);}catch{} });
   } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
 });
 
@@ -1095,20 +1129,18 @@ app.post("/generate-video/split-screen", async (req, res) => {
         .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
         .output(outputPath).on("end",resolve).on("error",reject).run();
     });
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition","attachment; filename=split-screen.mp4");
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
+    const silentS = outputPath.replace('.mp4','_s.mp4');
+    fs.renameSync(outputPath, silentS);
+    await mixMusicAndSend(silentS, outputPath, D, res, 'split-screen.mp4', () => { try{fs.unlinkSync(outputPath);}catch{} });
   } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
 });
 
 // ─── VIDEO TYPE 4: SUBTITLE/CAPTION STYLE ───
 app.post("/generate-video/subtitle", async (req, res) => {
-  const { lines = ["GoodDeeds Network","All your business tools","In one place","Email. SMS. WhatsApp.","Invoices. Social. AI.","Start free today."], format = "portrait" } = req.body || {};
-  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.portrait;
+  const { lines = ["GoodDeeds Network","All-in-One Platform","Email · SMS · WhatsApp","Start Free Today"], format = "square" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
-  const lineD = 1.8; const D = lines.length * lineD; const FPS = 25;
+  const lineD = 2.0; const D = lines.length * lineD; const FPS = 24;
   const tmpDir = os.tmpdir(); const ts = Date.now();
   const sceneFiles = []; const listFile = path.join(tmpDir, `list_${ts}.txt`);
   const outputPath = path.join(tmpDir, `subtitle_${ts}.mp4`);
@@ -1128,7 +1160,7 @@ app.post("/generate-video/subtitle", async (req, res) => {
       await new Promise((resolve, reject) => {
         ffmpeg().input(`color=c=${bgs[i%bgs.length]}:size=${w}x${h}:rate=${FPS}:duration=${lineD}`).inputOptions(["-f","lavfi"])
           .videoFilters(filters)
-          .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(lineD)])
+          .outputOptions(["-c:v","libx264","-preset","ultrafast","-crf","26","-pix_fmt","yuv420p","-t",String(lineD)])
           .output(sceneOut).on("end",resolve).on("error",reject).run();
       });
     }
@@ -1138,11 +1170,10 @@ app.post("/generate-video/subtitle", async (req, res) => {
         .outputOptions(["-c","copy","-movflags","+faststart"])
         .output(outputPath).on("end",resolve).on("error",reject).run();
     });
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition","attachment; filename=subtitle.mp4");
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-    stream.on("end", () => { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+    const silentSub = outputPath.replace('.mp4','_s.mp4');
+    fs.renameSync(outputPath, silentSub);
+    const subCleanup = () => { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); };
+    await mixMusicAndSend(silentSub, outputPath, D, res, 'subtitle.mp4', subCleanup);
   } catch(err) { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
 });
 
@@ -1153,7 +1184,7 @@ app.post("/generate-video/video-bg", async (req, res) => {
   const { w, h } = fmt;
   const D = 3.0; const FPS = 25;
   const tmpDir = os.tmpdir(); const ts = Date.now();
-  const bgVideoUrl = "https://cdn.pixabay.com/video/2020/07/30/46207-447087782_medium.mp4";
+  const bgVideoUrl = "https://www.w3schools.com/html/mov_bbb.mp4";
   const bgPath = path.join(tmpDir, `bg_${ts}.mp4`);
   const outputPath = path.join(tmpDir, `videobg_${ts}.mp4`);
   const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
@@ -1185,11 +1216,10 @@ app.post("/generate-video/video-bg", async (req, res) => {
         .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-an","-t",String(totalD)])
         .output(outputPath).on("end",resolve).on("error",reject).run();
     });
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition","attachment; filename=video-bg.mp4");
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-    stream.on("end", () => { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+    const silentVB = outputPath.replace('.mp4','_s.mp4');
+    fs.renameSync(outputPath, silentVB);
+    const vbCleanup = () => { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); };
+    await mixMusicAndSend(silentVB, outputPath, totalD, res, 'video-bg.mp4', vbCleanup);
   } catch(err) { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
 });
 
@@ -1239,11 +1269,10 @@ app.post("/generate-video/product", async (req, res) => {
         .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
         .output(outputPath).on("end",resolve).on("error",reject).run();
     });
-    res.setHeader("Content-Type","video/mp4");
-    res.setHeader("Content-Disposition","attachment; filename=product.mp4");
-    const stream = fs.createReadStream(outputPath);
-    stream.pipe(res);
-    stream.on("end", () => { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+    const silentP = outputPath.replace('.mp4','_s.mp4');
+    fs.renameSync(outputPath, silentP);
+    const pCleanup = () => { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); };
+    await mixMusicAndSend(silentP, outputPath, D, res, 'product.mp4', pCleanup);
   } catch(err) { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
 });
 
