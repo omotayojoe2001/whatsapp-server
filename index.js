@@ -754,8 +754,9 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
     .replace(/\\/g, "\\\\")
     .replace(/'/g, "’")
     .replace(/:/g, "\\:")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]");
+    .replace(/\[/g, "(")
+    .replace(/\]/g, ")")
+    .replace(/[\x00-\x1F]/g, "");
   const safeText = escText(sc.text);
   const centerY = yOffset !== 0 ? `(${h}-text_h)/2+${yOffset}` : `(${h}-text_h)/2`;
   const centerX = `(${w}-text_w)/2`;
@@ -840,10 +841,10 @@ async function fetchPixabayMusic() {
 // ─── JAMENDO MUSIC FETCH ───
 async function fetchPixabayMusic() {
   const clientId = process.env.JAMENDO_CLIENT_ID || "3ff88d7b";
-  const tags = ["background", "corporate", "ambient", "motivational"];
+  const tags = ["corporate", "upbeat", "motivational", "positive", "energetic"];
   const tag = tags[Math.floor(Math.random() * tags.length)];
   try {
-    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&audioformat=mp32&include=musicinfo&boost=popularity_total`;
+    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&audioformat=mp32&include=musicinfo&boost=popularity_total&speed=medium_high&vocalinstrumental=instrumental`;
     const res = await fetch(url);
     const data = await res.json();
     const tracks = (data.results || []).filter(t => t.audio);
@@ -1074,7 +1075,7 @@ app.post("/generate-video/data-viz", async (req, res) => {
     filters.push(`drawbox=x=${startX}:y=${y}:w='${barMaxW}':h=${barH}:color=0x333333:t=fill`);
     filters.push(`drawbox=x=${startX}:y=${y}:w='if(lt(t,${delay}),0,min(${barW}*(t-${delay})/${animDur},${barW}))':h=${barH}:color=0x22c55e:t=fill`);
     filters.push(`drawtext=text='${stat.label.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${Math.round(h*0.035)}:x=${startX}:y=${y-Math.round(h*0.045)}:alpha='if(lt(t,${delay}),0,1)'`);
-    filters.push(`drawtext=text='${stat.value}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.04)}:x=${startX+barW+10}:y=${y+Math.round(barH*0.1)}:alpha='if(lt(t,${(delay+animDur).toFixed(1)}),0,1)'`);
+    filters.push(`drawtext=text='${stat.value}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.04)}:x=${Math.min(startX+barW+10, w-80)}:y=${y+Math.round(barH*0.1)}:alpha='if(lt(t,${(delay+animDur).toFixed(1)}),0,1)'`);
   });
   try {
     await new Promise((resolve, reject) => {
@@ -1091,7 +1092,7 @@ app.post("/generate-video/data-viz", async (req, res) => {
 
 // ─── VIDEO TYPE 3: SPLIT SCREEN ───
 app.post("/generate-video/split-screen", async (req, res) => {
-  const { leftText = "Before GoodDeeds", rightText = "After GoodDeeds", leftSub = "Scattered tools\nWasted time\nNo insights", rightSub = "One dashboard\nFull automation\nReal results", format = "landscape" } = req.body || {};
+  const { leftText = "Before", rightText = "After", leftSub = "Scattered tools\nWasted time\nNo insights", rightSub = "One dashboard\nFull automation\nReal results", format = "landscape" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
   const { w, h } = fmt;
   const D = 5.0; const FPS = 25;
@@ -1107,19 +1108,19 @@ app.post("/generate-video/split-screen", async (req, res) => {
     `drawbox=x=0:y=0:w=${half}:h=${h}:color=0x1a0a0a:t=fill`,
     // Right panel background
     `drawbox=x=${half}:y=0:w=${half}:h=${h}:color=0x0a1a0a:t=fill`,
-    // Divider line
+    // Divider
     `drawbox=x=${half-1}:y=0:w=2:h=${h}:color=0x444444:t=fill`,
-    // Left title
-    `drawtext=text='${leftText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xff6b6b:fontsize=${fs2}:x=${Math.round(half*0.5)-100}:y=${Math.round(h*0.2)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
-    // Right title
-    `drawtext=text='${rightText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0x22c55e:fontsize=${fs2}:x=${half+Math.round(half*0.5)-100}:y=${Math.round(h*0.2)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
+    // Left title — centered in left half
+    `drawtext=text='${leftText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xff6b6b:fontsize=${fs2}:x='(${half}-text_w)/2':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+    // Right title — centered in right half
+    `drawtext=text='${rightText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0x22c55e:fontsize=${fs2}:x='${half}+((${half}-text_w)/2)':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
     // Left sub lines
     ...leftSub.split("\n").map((line, i) =>
-      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${fs3}:x=${Math.round(half*0.1)}:y=${Math.round(h*0.38)+i*Math.round(h*0.1)}:alpha='if(lt(t,${0.6+i*0.2}),0,if(lt(t,${0.9+i*0.2}),(t-${0.6+i*0.2})/0.3,1))'`
+      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${fs3}:x=${Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.6+i*0.2}),0,if(lt(t,${0.9+i*0.2}),(t-${0.6+i*0.2})/0.3,1))'`
     ),
     // Right sub lines
     ...rightSub.split("\n").map((line, i) =>
-      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=white:fontsize=${fs3}:x=${half+Math.round(half*0.1)}:y=${Math.round(h*0.38)+i*Math.round(h*0.1)}:alpha='if(lt(t,${0.8+i*0.2}),0,if(lt(t,${1.1+i*0.2}),(t-${0.8+i*0.2})/0.3,1))'`
+      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=white:fontsize=${fs3}:x=${half+Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.8+i*0.2}),0,if(lt(t,${1.1+i*0.2}),(t-${0.8+i*0.2})/0.3,1))'`
     ),
   ];
   try {
@@ -1137,7 +1138,7 @@ app.post("/generate-video/split-screen", async (req, res) => {
 
 // ─── VIDEO TYPE 4: SUBTITLE/CAPTION STYLE ───
 app.post("/generate-video/subtitle", async (req, res) => {
-  const { lines = ["GoodDeeds Network","All-in-One Platform","Email · SMS · WhatsApp","Start Free Today"], format = "square" } = req.body || {};
+  const { lines = ["GoodDeeds Network","All-in-One Platform","Email  SMS  WhatsApp","Start Free Today"], format = "square" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
   const lineD = 2.0; const D = lines.length * lineD; const FPS = 24;
