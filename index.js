@@ -907,34 +907,46 @@ app.post("/generate-video", async (req, res) => {
     console.log("[Music] URL:", musicUrl || "none");
 
     if (musicUrl) {
-      // Mix music into video at low volume, trimmed to video length
-      await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(silentPath)
-          .input(musicUrl)
-          .complexFilter([
-            `[1:a]volume=0.18,atrim=0:${totalDuration},asetpts=PTS-STARTPTS[music]`,
-            `[music]apad=pad_dur=${totalDuration}[aout]`,
-          ])
-          .outputOptions([
-            "-map", "0:v",
-            "-map", "[aout]",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-shortest",
-            "-movflags", "+faststart",
-          ])
-          .output(outputPath)
-          .on("end", resolve)
-          .on("error", (err) => {
-            // If music mixing fails, just use the silent video
-            console.log("[Music] Mix failed, using silent video:", err.message);
-            fs.copyFileSync(silentPath, outputPath);
-            resolve();
-          })
-          .run();
-      });
+      const musicPath = path.join(tmpDir, `music_${ts}.mp3`);
+      try {
+        // Download MP3 to temp file — avoids FFmpeg SIGSEGV on streamed URLs
+        const musicRes = await fetch(musicUrl);
+        if (!musicRes.ok) throw new Error(`HTTP ${musicRes.status}`);
+        const musicBuf = await musicRes.arrayBuffer();
+        fs.writeFileSync(musicPath, Buffer.from(musicBuf));
+        console.log(`[Music] Downloaded ${Math.round(musicBuf.byteLength / 1024)}KB`);
+
+        await new Promise((resolve, reject) => {
+          ffmpeg()
+            .input(silentPath)
+            .input(musicPath)
+            .complexFilter([
+              `[1:a]volume=0.18,atrim=0:${totalDuration},asetpts=PTS-STARTPTS[aout]`,
+            ])
+            .outputOptions([
+              "-map", "0:v",
+              "-map", "[aout]",
+              "-c:v", "copy",
+              "-c:a", "aac",
+              "-b:a", "128k",
+              "-shortest",
+              "-movflags", "+faststart",
+            ])
+            .output(outputPath)
+            .on("end", resolve)
+            .on("error", (err) => {
+              console.log("[Music] Mix failed, using silent:", err.message);
+              try { fs.copyFileSync(silentPath, outputPath); } catch {}
+              resolve();
+            })
+            .run();
+        });
+      } catch (e) {
+        console.log("[Music] Download failed, using silent:", e.message);
+        try { fs.copyFileSync(silentPath, outputPath); } catch {}
+      } finally {
+        try { fs.unlinkSync(musicPath); } catch {}
+      }
     } else {
       fs.copyFileSync(silentPath, outputPath);
     }
