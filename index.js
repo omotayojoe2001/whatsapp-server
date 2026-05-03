@@ -751,12 +751,11 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
   const fade = 0.35;
   const escText = (t) => t
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "’")
-    .replace(/:/g, "\\:")
-    .replace(/\[/g, "(")
-    .replace(/\]/g, ")")
-    .replace(/[\x00-\x1F]/g, "");
+    .replace(/[\\\[\]{}|<>^~`@#$%&*+=]/g, "")
+    .replace(/'/g, "")
+    .replace(/:/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   const safeText = escText(sc.text);
   const centerY = yOffset !== 0 ? `(${h}-text_h)/2+${yOffset}` : `(${h}-text_h)/2`;
   const centerX = `(${w}-text_w)/2`;
@@ -1025,7 +1024,7 @@ app.post("/generate-video/kinetic", async (req, res) => {
   const wordDelay = 0.4;
   const colors = ["white","0x22c55e","0x60a5fa","white","0xa78bfa","0xfbbf24"];
   const filters = words.map((word, idx) => {
-    const sw = word.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const sw = word.replace(/'/g,"").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
     const startT = (idx * wordDelay).toFixed(2);
     const endT = (idx * wordDelay + 0.4).toFixed(2);
     const yExpr = `if(lt(t,${startT}),${h},if(lt(t,${endT}),${h}-((${h}-((${h}-text_h)/2))*(t-${startT})/0.4),(${h}-text_h)/2))`;
@@ -1064,7 +1063,7 @@ app.post("/generate-video/data-viz", async (req, res) => {
   const gap = Math.round(h * 0.18);
   const animDur = 1.5;
   const filters = [
-    `drawtext=text='${title.replace(/'/g,"’")}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.055)}:x=(w-text_w)/2:y=${Math.round(h*0.1)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+    `drawtext=text='${title.replace(/'/g,"")}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.055)}:x=(w-text_w)/2:y=${Math.round(h*0.1)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
   ];
   stats.forEach((stat, idx) => {
     const y = startY + idx * gap;
@@ -1074,7 +1073,7 @@ app.post("/generate-video/data-viz", async (req, res) => {
     // Animated bar growing from left
     filters.push(`drawbox=x=${startX}:y=${y}:w='${barMaxW}':h=${barH}:color=0x333333:t=fill`);
     filters.push(`drawbox=x=${startX}:y=${y}:w='if(lt(t,${delay}),0,min(${barW}*(t-${delay})/${animDur},${barW}))':h=${barH}:color=0x22c55e:t=fill`);
-    filters.push(`drawtext=text='${stat.label.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${Math.round(h*0.035)}:x=${startX}:y=${y-Math.round(h*0.045)}:alpha='if(lt(t,${delay}),0,1)'`);
+    filters.push(`drawtext=text='${stat.label.replace(/'/g,"")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${Math.round(h*0.035)}:x=${startX}:y=${y-Math.round(h*0.045)}:alpha='if(lt(t,${delay}),0,1)'`);
     filters.push(`drawtext=text='${stat.value}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.04)}:x=${Math.min(startX+barW+10, w-80)}:y=${y+Math.round(barH*0.1)}:alpha='if(lt(t,${(delay+animDur).toFixed(1)}),0,1)'`);
   });
   try {
@@ -1111,16 +1110,16 @@ app.post("/generate-video/split-screen", async (req, res) => {
     // Divider
     `drawbox=x=${half-1}:y=0:w=2:h=${h}:color=0x444444:t=fill`,
     // Left title — centered in left half
-    `drawtext=text='${leftText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xff6b6b:fontsize=${fs2}:x='(${half}-text_w)/2':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+    `drawtext=text='${leftText.replace(/'/g,"")}'${fontOpt}:fontcolor=0xff6b6b:fontsize=${fs2}:x='(${half}-text_w)/2':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
     // Right title — centered in right half
-    `drawtext=text='${rightText.replace(/'/g,"’")}'${fontOpt}:fontcolor=0x22c55e:fontsize=${fs2}:x='${half}+((${half}-text_w)/2)':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
+    `drawtext=text='${rightText.replace(/'/g,"")}'${fontOpt}:fontcolor=0x22c55e:fontsize=${fs2}:x='${half}+((${half}-text_w)/2)':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
     // Left sub lines
     ...leftSub.split("\n").map((line, i) =>
-      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${fs3}:x=${Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.6+i*0.2}),0,if(lt(t,${0.9+i*0.2}),(t-${0.6+i*0.2})/0.3,1))'`
+      `drawtext=text='${line.replace(/'/g,"")}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${fs3}:x=${Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.6+i*0.2}),0,if(lt(t,${0.9+i*0.2}),(t-${0.6+i*0.2})/0.3,1))'`
     ),
     // Right sub lines
     ...rightSub.split("\n").map((line, i) =>
-      `drawtext=text='${line.replace(/'/g,"’")}'${fontOpt}:fontcolor=white:fontsize=${fs3}:x=${half+Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.8+i*0.2}),0,if(lt(t,${1.1+i*0.2}),(t-${0.8+i*0.2})/0.3,1))'`
+      `drawtext=text='${line.replace(/'/g,"")}'${fontOpt}:fontcolor=white:fontsize=${fs3}:x=${half+Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.8+i*0.2}),0,if(lt(t,${1.1+i*0.2}),(t-${0.8+i*0.2})/0.3,1))'`
     ),
   ];
   try {
@@ -1138,7 +1137,7 @@ app.post("/generate-video/split-screen", async (req, res) => {
 
 // ─── VIDEO TYPE 4: SUBTITLE/CAPTION STYLE ───
 app.post("/generate-video/subtitle", async (req, res) => {
-  const { lines = ["GoodDeeds Network","All-in-One Platform","Email  SMS  WhatsApp","Start Free Today"], format = "square" } = req.body || {};
+  const { lines = ["GoodDeeds Network","All In One Platform","Email SMS WhatsApp","Invoices Social AI","Start Free Today"], format = "square" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
   const lineD = 2.0; const D = lines.length * lineD; const FPS = 24;
@@ -1152,7 +1151,7 @@ app.post("/generate-video/subtitle", async (req, res) => {
     for (let i = 0; i < lines.length; i++) {
       const sceneOut = path.join(tmpDir, `sub_${ts}_${i}.mp4`);
       sceneFiles.push(sceneOut);
-      const safe = lines[i].replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+      const safe = lines[i].replace(/'/g,"").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
       const yPos = Math.round(h * 0.72);
       const filters = [
         `drawbox=x=0:y=${yPos-20}:w=${w}:h=${Math.round(h*0.12)}:color=0x000000@0.7:t=fill`,
@@ -1207,7 +1206,7 @@ app.post("/generate-video/video-bg", async (req, res) => {
     scenes.forEach((sc, idx) => {
       const tStart = idx * D;
       const tEnd = tStart + D;
-      const safe = sc.text.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+      const safe = sc.text.replace(/'/g,"").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
       const alpha = `if(lt(t,${tStart}),0,if(lt(t,${(tStart+0.4).toFixed(1)}),(t-${tStart})/0.4,if(gt(t,${(tEnd-0.4).toFixed(1)}),(${tEnd}-t)/0.4,1)))`;
       filters.push(`drawtext=text='${safe}'${fontOpt}:fontcolor=${sc.fontcolor||"white"}:fontsize=${Math.round((sc.fontsize||60)*fmt.fontScale)}:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${alpha}'`);
     });
@@ -1244,9 +1243,9 @@ app.post("/generate-video/product", async (req, res) => {
     const imgW = Math.round(w * 0.55); const imgH = Math.round(h * 0.5);
     const imgX = Math.round((w - imgW) / 2); const imgY = Math.round(h * 0.08);
     const textY = Math.round(h * 0.65);
-    const safeProduct = productName.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
-    const safePrice = price.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
-    const safeCta = cta.replace(/'/g,"’").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const safeProduct = productName.replace(/'/g,"").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const safePrice = price.replace(/'/g,"").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
+    const safeCta = cta.replace(/'/g,"").replace(/:/g,"\:").replace(/[/g,"\[").replace(/]/g,"\]");
     // Build filter: bg + image overlay + text
     const filterComplex = [
       // Scale product image
