@@ -815,6 +815,47 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   });
 }
 
+
+// ─── PIXABAY MUSIC FETCH ───
+async function fetchPixabayMusic() {
+  const key = process.env.PIXABAY_API_KEY || "55700466-152b17378ca052da54a0afb72";
+  const queries = ["corporate background", "motivational upbeat", "ambient business"];
+  const q = queries[Math.floor(Math.random() * queries.length)];
+  try {
+    const url = `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(q)}&category=music&per_page=20&safesearch=true`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const hits = (data.hits || []).filter(h => h.webformatURL || h.previewURL);
+    if (!hits.length) return null;
+    const hit = hits[Math.floor(Math.random() * Math.min(hits.length, 10))];
+    // Pixabay music tracks are returned as audio files via previewURL
+    return hit.previewURL || hit.webformatURL || null;
+  } catch (e) {
+    console.log("[Music] Fetch failed:", e.message);
+    return null;
+  }
+}
+
+
+// ─── PIXABAY MUSIC FETCH ───
+async function fetchPixabayMusic() {
+  const key = process.env.PIXABAY_API_KEY || "55700466-152b17378ca052da54a0afb72";
+  const queries = ["corporate background", "motivational upbeat", "ambient business"];
+  const q = queries[Math.floor(Math.random() * queries.length)];
+  try {
+    const url = `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(q)}&category=music&per_page=20&safesearch=true`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const hits = (data.hits || []).filter(h => h.previewURL);
+    if (!hits.length) return null;
+    const hit = hits[Math.floor(Math.random() * Math.min(hits.length, 10))];
+    return hit.previewURL || null;
+  } catch (e) {
+    console.log("[Music] Fetch failed:", e.message);
+    return null;
+  }
+}
+
 app.post("/generate-video", async (req, res) => {
   const formatKey = (req.body?.format || "landscape");
   const fmt = VIDEO_FORMATS[formatKey] || VIDEO_FORMATS.landscape;
@@ -845,16 +886,58 @@ app.post("/generate-video", async (req, res) => {
     }
 
     fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f}'`).join("\n"));
+    const silentPath = path.join(tmpDir, `silent_${ts}.mp4`);
+
+    // Step 1: Concat scenes (no audio yet)
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(listFile)
         .inputOptions(["-f", "concat", "-safe", "0"])
         .outputOptions(["-c", "copy", "-movflags", "+faststart"])
-        .output(outputPath)
+        .output(silentPath)
         .on("end", resolve)
         .on("error", reject)
         .run();
     });
+
+    // Step 2: Fetch background music from Pixabay
+    const totalDuration = VIDEO_SCENES.length * D;
+    const musicUrl = await fetchPixabayMusic();
+    console.log("[Music] URL:", musicUrl || "none");
+
+    if (musicUrl) {
+      // Mix music into video at low volume, trimmed to video length
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(silentPath)
+          .input(musicUrl)
+          .complexFilter([
+            `[1:a]volume=0.18,atrim=0:${totalDuration},asetpts=PTS-STARTPTS[music]`,
+            `[music]apad=pad_dur=${totalDuration}[aout]`,
+          ])
+          .outputOptions([
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-shortest",
+            "-movflags", "+faststart",
+          ])
+          .output(outputPath)
+          .on("end", resolve)
+          .on("error", (err) => {
+            // If music mixing fails, just use the silent video
+            console.log("[Music] Mix failed, using silent video:", err.message);
+            fs.copyFileSync(silentPath, outputPath);
+            resolve();
+          })
+          .run();
+      });
+    } else {
+      fs.copyFileSync(silentPath, outputPath);
+    }
+    try { fs.unlinkSync(silentPath); } catch {}
 
     console.log(`[Video] Done: ${formatKey} ${fmt.w}x${fmt.h}`);
     res.setHeader("Content-Type", "video/mp4");
