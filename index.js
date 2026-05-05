@@ -964,203 +964,246 @@ app.post("/generate-video", async (req, res) => {
 
 
 
-// ─── TEXT CLEANER FOR FFMPEG DRAWTEXT ───
-// FFmpeg drawtext is extremely sensitive to special characters.
-// Strip everything that could be misinterpreted as filter syntax.
+// ─── TEXT CLEANER ───
 function cleanStr(t) {
   return String(t)
-    .replace(/[\[\]\\:'"{}|<>]/g, ' ')  // replace all problematic chars with space
-    .replace(/\s+/g, ' ')                   // collapse multiple spaces
+    .replace(/[\\[\]\\\\:'"{}|<>]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
-// ─── SHARED: Mix music into a silent video and stream response ──
-async function mixMusicAndSend(silentPath, outputPath, totalDuration, res, filename, cleanup) {
-  const musicUrl = await fetchPixabayMusic();
-  if (musicUrl) {
-    const musicPath = silentPath.replace('.mp4', '_music.mp3');
-    try {
-      const musicRes = await fetch(musicUrl);
-      if (musicRes.ok) {
-        const buf = await musicRes.arrayBuffer();
-        fs.writeFileSync(musicPath, Buffer.from(buf));
-        await new Promise((resolve) => {
-          ffmpeg()
-            .input(silentPath)
-            .input(musicPath)
-            .complexFilter([`[1:a]volume=0.15,atrim=0:${totalDuration},asetpts=PTS-STARTPTS[aout]`])
-            .outputOptions(["-map","0:v","-map","[aout]","-c:v","copy","-c:a","aac","-b:a","128k","-shortest","-movflags","+faststart"])
-            .output(outputPath)
-            .on("end", resolve)
-            .on("error", () => { try{fs.copyFileSync(silentPath,outputPath);}catch{} resolve(); })
-            .run();
-        });
-        try{fs.unlinkSync(musicPath);}catch{}
-      } else { fs.copyFileSync(silentPath, outputPath); }
-    } catch(e) { console.log("[Music] failed:", e.message); try{fs.copyFileSync(silentPath,outputPath);}catch{} }
-  } else {
-    fs.copyFileSync(silentPath, outputPath);
-  }
-  try{fs.unlinkSync(silentPath);}catch{}
-  res.setHeader("Content-Type","video/mp4");
-  res.setHeader("Content-Disposition",`attachment; filename=${filename}`);
-  const stream = fs.createReadStream(outputPath);
-  stream.pipe(res);
-  stream.on("end", cleanup);
-  stream.on("error", cleanup);
+// ─── JAMENDO MUSIC ───
+async function fetchBgMusic() {
+  const clientId = process.env.JAMENDO_CLIENT_ID || "3ff88d7b";
+  const tags = ["corporate", "upbeat", "positive", "energetic"];
+  const tag = tags[Math.floor(Math.random() * tags.length)];
+  try {
+    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&audioformat=mp32&boost=popularity_total`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const tracks = (data.results || []).filter(t => t.audio);
+    if (!tracks.length) return null;
+    const track = tracks[Math.floor(Math.random() * Math.min(tracks.length, 8))];
+    console.log(`[Music] "${track.name}" by ${track.artist_name}`);
+    return track.audio;
+  } catch (e) { console.log("[Music] fetch failed:", e.message); return null; }
 }
 
-// ─── VIDEO TYPE 1: KINETIC TYPOGRAPHY ───
+// ─── ADD MUSIC TO VIDEO ───
+async function addMusic(silentPath, outputPath, duration) {
+  const musicUrl = await fetchBgMusic();
+  if (!musicUrl) { fs.copyFileSync(silentPath, outputPath); return; }
+  const musicPath = silentPath + '.mp3';
+  try {
+    const res = await fetch(musicUrl);
+    if (!res.ok) { fs.copyFileSync(silentPath, outputPath); return; }
+    fs.writeFileSync(musicPath, Buffer.from(await res.arrayBuffer()));
+    console.log(`[Music] Downloaded ${Math.round(fs.statSync(musicPath).size/1024)}KB`);
+    await new Promise((resolve) => {
+      ffmpeg()
+        .input(silentPath).input(musicPath)
+        .complexFilter([`[1:a]volume=0.15,atrim=0:${duration},asetpts=PTS-STARTPTS[a]`])
+        .outputOptions(["-map","0:v","-map","[a]","-c:v","copy","-c:a","aac","-b:a","128k","-shortest","-movflags","+faststart"])
+        .output(outputPath)
+        .on("end", resolve)
+        .on("error", () => { try{fs.copyFileSync(silentPath,outputPath);}catch{} resolve(); })
+        .run();
+    });
+  } catch { try{fs.copyFileSync(silentPath,outputPath);}catch{} }
+  try{fs.unlinkSync(musicPath);}catch{}
+  try{fs.unlinkSync(silentPath);}catch{}
+}
+
+// ─── FONT HELPER ───
+function getFont() {
+  const candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf","/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"];
+  const f = candidates.find(p => fs.existsSync(p));
+  return f ? `:fontfile=${f}` : "";
+}
+
+// ═══════════════════════════════════════════════════════════
+// VIDEO TYPE 1: KINETIC TYPOGRAPHY
+// Fix: ONE word per scene, no x overlap possible
+// ═══════════════════════════════════════════════════════════
 app.post("/generate-video/kinetic", async (req, res) => {
-  const { text = "GoodDeeds Network", format = "square" } = req.body || {};
+  const { text = "GoodDeeds All In One", format = "square" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
-  const D = 4.0; const FPS = 25;
-  const tmpDir = os.tmpdir(); const ts = Date.now();
-  const outputPath = path.join(tmpDir, `kinetic_${ts}.mp4`);
-  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
-  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
   const words = text.split(" ");
-  const charW = Math.round(60 * 0.55);
-  const spaceW = Math.round(60 * 0.3);
-  const wordWidths = words.map(w => w.length * charW);
-  const totalW = wordWidths.reduce((s,ww)=>s+ww,0) + spaceW*(words.length-1);
-  let xCursor = Math.round((w - totalW) / 2);
-  const wordDelay = 0.4;
-  const colors = ["white","0x22c55e","0x60a5fa","white","0xa78bfa","0xfbbf24"];
-  const filters = words.map((word, idx) => {
-    const sw = cleanStr(word);
-    const startT = (idx * wordDelay).toFixed(2);
-    const endT = (idx * wordDelay + 0.4).toFixed(2);
-    const yExpr = `if(lt(t,${startT}),${h},if(lt(t,${endT}),${h}-((${h}-((${h}-text_h)/2))*(t-${startT})/0.4),(${h}-text_h)/2))`;
-    const alpha = `if(lt(t,${startT}),0,if(lt(t,${endT}),(t-${startT})/0.4,if(gt(t,${(D-0.5).toFixed(2)}),(${D}-t)/0.5,1)))`;
-    const color = colors[idx % colors.length];
-    const xPos = xCursor; xCursor += wordWidths[idx] + spaceW;
-    return `drawtext=text='${sw}'${fontOpt}:fontcolor=${color}:fontsize=${Math.round(h*0.07)}:x=${xPos}:y='${yExpr}':alpha='${alpha}'`;
-  });
+  const wordDur = 0.8;
+  const D = words.length * wordDur;
+  const FPS = 24;
+  const tmpDir = os.tmpdir(); const ts = Date.now();
+  const sceneFiles = [];
+  const outputPath = path.join(tmpDir, `kinetic_${ts}.mp4`);
+  const listFile = path.join(tmpDir, `klist_${ts}.txt`);
+  const font = getFont();
+  const colors = ["white","0x22c55e","0x60a5fa","0xa78bfa","0xfbbf24","white"];
+  const bgs = ["0x0a0a0a","0x0a0a1a","0x0a1a0a","0x1a0a1a","0x0a0a0a"];
   try {
+    for (let i = 0; i < words.length; i++) {
+      const sceneOut = path.join(tmpDir, `kw_${ts}_${i}.mp4`);
+      sceneFiles.push(sceneOut);
+      const word = cleanStr(words[i]);
+      const color = colors[i % colors.length];
+      const bg = bgs[i % bgs.length];
+      const fade = 0.15;
+      // Word slides up from below center and fades in
+      const yExpr = `(h-text_h)/2+50*(1-t/${wordDur})`;
+      const alpha = `if(lt(t,${fade}),t/${fade},if(gt(t,${(wordDur-fade).toFixed(2)}),(${wordDur}-t)/${fade},1))`;
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(`color=c=${bg}:size=${w}x${h}:rate=${FPS}:duration=${wordDur}`)
+          .inputOptions(["-f","lavfi"])
+          .videoFilters([`drawtext=text='${word}'${font}:fontcolor=${color}:fontsize=${Math.round(h*0.12)}:x=(w-text_w)/2:y='${yExpr}':alpha='${alpha}'`])
+          .outputOptions(["-c:v","libx264","-preset","ultrafast","-crf","26","-pix_fmt","yuv420p","-t",String(wordDur)])
+          .output(sceneOut).on("end",resolve).on("error",reject).run();
+      });
+    }
+    fs.writeFileSync(listFile, sceneFiles.map(f=>`file '${f}'`).join("\n"));
+    const silentPath = outputPath + '.silent.mp4';
     await new Promise((resolve, reject) => {
-      ffmpeg().input(`color=c=0x0d0d0d:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
-        .videoFilters(filters)
-        .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
-        .output(outputPath).on("end",resolve).on("error",reject).run();
+      ffmpeg().input(listFile).inputOptions(["-f","concat","-safe","0"])
+        .outputOptions(["-c","copy"]).output(silentPath).on("end",resolve).on("error",reject).run();
     });
-    const silentK = outputPath.replace('.mp4','_s.mp4');
-    fs.renameSync(outputPath, silentK);
-    await mixMusicAndSend(silentK, outputPath, D, res, 'kinetic.mp4', () => { try{fs.unlinkSync(outputPath);}catch{} });
-  } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
+    await addMusic(silentPath, outputPath, D);
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=kinetic.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
+  } catch(err) { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
 });
 
-// ─── VIDEO TYPE 2: DATA VISUALIZATION ───
+// ═══════════════════════════════════════════════════════════
+// VIDEO TYPE 2: DATA VISUALIZATION
+// Fix: values inside bars, proper centering
+// ═══════════════════════════════════════════════════════════
 app.post("/generate-video/data-viz", async (req, res) => {
-  const { title = "Your Growth This Month", stats = [{label:"Emails Sent",value:450,max:500},{label:"SMS Sent",value:120,max:200},{label:"Revenue",value:75,max:100}], format = "landscape" } = req.body || {};
-  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
+  const { title = "Your Growth This Month", stats = [{label:"Emails Sent",value:450,max:500},{label:"SMS Sent",value:120,max:200},{label:"Revenue",value:75,max:100}], format = "square" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
-  const D = 5.0; const FPS = 25;
+  const D = 5.0; const FPS = 24;
   const tmpDir = os.tmpdir(); const ts = Date.now();
   const outputPath = path.join(tmpDir, `dataviz_${ts}.mp4`);
-  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
-  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
-  const barH = Math.round(h * 0.08);
-  const barMaxW = Math.round(w * 0.6);
-  const startX = Math.round(w * 0.2);
-  const startY = Math.round(h * 0.3);
-  const gap = Math.round(h * 0.18);
-  const animDur = 1.5;
+  const font = getFont();
+  const barH = Math.round(h * 0.07);
+  const barMaxW = Math.round(w * 0.55);
+  const startX = Math.round(w * 0.22);
+  const startY = Math.round(h * 0.32);
+  const gap = Math.round(h * 0.2);
+  const animDur = 1.2;
   const filters = [
-    `drawtext=text='${cleanStr(title)}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.055)}:x=(w-text_w)/2:y=${Math.round(h*0.1)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+    `drawtext=text='${cleanStr(title)}'${font}:fontcolor=white:fontsize=${Math.round(h*0.05)}:x=(w-text_w)/2:y=${Math.round(h*0.1)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
   ];
   stats.forEach((stat, idx) => {
     const y = startY + idx * gap;
     const pct = Math.min(stat.value / stat.max, 1);
     const barW = Math.round(barMaxW * pct);
-    const delay = 0.5 + idx * 0.4;
-    // Animated bar growing from left
-    filters.push(`drawbox=x=${startX}:y=${y}:w='${barMaxW}':h=${barH}:color=0x333333:t=fill`);
-    filters.push(`drawbox=x=${startX}:y=${y}:w='if(lt(t,${delay}),0,min(${barW}*(t-${delay})/${animDur},${barW}))':h=${barH}:color=0x22c55e:t=fill`);
-    filters.push(`drawtext=text='${cleanStr(stat.label)}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${Math.round(h*0.035)}:x=${startX}:y=${y-Math.round(h*0.045)}:alpha='if(lt(t,${delay}),0,1)'`);
-    filters.push(`drawtext=text='${stat.value}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.04)}:x=${Math.min(startX+barW+10, w-80)}:y=${y+Math.round(barH*0.1)}:alpha='if(lt(t,${(delay+animDur).toFixed(1)}),0,1)'`);
+    const delay = 0.5 + idx * 0.5;
+    // Background bar
+    filters.push(`drawbox=x=${startX}:y=${y}:w=${barMaxW}:h=${barH}:color=0x222222:t=fill`);
+    // Animated green bar
+    filters.push(`drawbox=x=${startX}:y=${y}:w='min(${barW},${barW}*max(0,(t-${delay}))/${animDur})':h=${barH}:color=0x22c55e:t=fill`);
+    // Label ABOVE bar
+    filters.push(`drawtext=text='${cleanStr(stat.label)}'${font}:fontcolor=0xcccccc:fontsize=${Math.round(h*0.032)}:x=${startX}:y=${y-Math.round(h*0.05)}:alpha='if(lt(t,${delay}),0,1)'`);
+    // Value INSIDE bar (left aligned with padding)
+    filters.push(`drawtext=text='${stat.value}'${font}:fontcolor=white:fontsize=${Math.round(h*0.035)}:x=${startX+12}:y=${y+Math.round(barH*0.15)}:alpha='if(lt(t,${(delay+animDur).toFixed(1)}),0,1)'`);
   });
   try {
+    const silentPath = outputPath + '.silent.mp4';
     await new Promise((resolve, reject) => {
       ffmpeg().input(`color=c=0x0a0a1a:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
         .videoFilters(filters)
-        .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
-        .output(outputPath).on("end",resolve).on("error",reject).run();
+        .outputOptions(["-c:v","libx264","-preset","ultrafast","-crf","26","-pix_fmt","yuv420p","-t",String(D)])
+        .output(silentPath).on("end",resolve).on("error",reject).run();
     });
-    const silentD = outputPath.replace('.mp4','_s.mp4');
-    fs.renameSync(outputPath, silentD);
-    await mixMusicAndSend(silentD, outputPath, D, res, 'dataviz.mp4', () => { try{fs.unlinkSync(outputPath);}catch{} });
+    await addMusic(silentPath, outputPath, D);
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=dataviz.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
   } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
 });
 
-// ─── VIDEO TYPE 3: SPLIT SCREEN ───
+// ═══════════════════════════════════════════════════════════
+// VIDEO TYPE 3: SPLIT SCREEN
+// Fix: short text, centered with (w-text_w)/2, no overflow
+// ═══════════════════════════════════════════════════════════
 app.post("/generate-video/split-screen", async (req, res) => {
-  const { leftText = "Before", rightText = "After", leftSub = "Scattered tools\nWasted time\nNo insights", rightSub = "One dashboard\nFull automation\nReal results", format = "landscape" } = req.body || {};
-  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
+  const { leftTitle = "Before", rightTitle = "After", leftLines = ["Scattered tools","Wasted time","No insights"], rightLines = ["One dashboard","Full automation","Real results"], format = "square" } = req.body || {};
+  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
-  const D = 5.0; const FPS = 25;
+  const D = 5.0; const FPS = 24;
   const tmpDir = os.tmpdir(); const ts = Date.now();
   const outputPath = path.join(tmpDir, `split_${ts}.mp4`);
-  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
-  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
+  const font = getFont();
   const half = Math.round(w / 2);
-  const fs2 = Math.round(h * 0.055);
-  const fs3 = Math.round(h * 0.038);
+  const titleSize = Math.round(h * 0.06);
+  const lineSize = Math.round(h * 0.035);
   const filters = [
-    // Left panel background
-    `drawbox=x=0:y=0:w=${half}:h=${h}:color=0x1a0a0a:t=fill`,
-    // Right panel background
-    `drawbox=x=${half}:y=0:w=${half}:h=${h}:color=0x0a1a0a:t=fill`,
-    // Divider
-    `drawbox=x=${half-1}:y=0:w=2:h=${h}:color=0x444444:t=fill`,
-    // Left title — centered in left half
-    `drawtext=text='${cleanStr(leftText)}'${fontOpt}:fontcolor=0xff6b6b:fontsize=${fs2}:x='(${half}-text_w)/2':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
-    // Right title — centered in right half
-    `drawtext=text='${cleanStr(rightText)}'${fontOpt}:fontcolor=0x22c55e:fontsize=${fs2}:x='${half}+((${half}-text_w)/2)':y=${Math.round(h*0.18)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
-    // Left sub lines
-    ...leftSub.split("\n").map((line, i) =>
-      `drawtext=text='${cleanStr(line)}'${fontOpt}:fontcolor=0xaaaaaa:fontsize=${fs3}:x=${Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.6+i*0.2}),0,if(lt(t,${0.9+i*0.2}),(t-${0.6+i*0.2})/0.3,1))'`
-    ),
-    // Right sub lines
-    ...rightSub.split("\n").map((line, i) =>
-      `drawtext=text='${line.replace(/'/g,"")}'${fontOpt}:fontcolor=white:fontsize=${fs3}:x=${half+Math.round(half*0.08)}:y=${Math.round(h*0.35)+i*Math.round(h*0.12)}:alpha='if(lt(t,${0.8+i*0.2}),0,if(lt(t,${1.1+i*0.2}),(t-${0.8+i*0.2})/0.3,1))'`
-    ),
+    `drawbox=x=0:y=0:w=${half}:h=${h}:color=0x1a0505:t=fill`,
+    `drawbox=x=${half}:y=0:w=${half}:h=${h}:color=0x051a05:t=fill`,
+    `drawbox=x=${half-1}:y=0:w=2:h=${h}:color=0x333333:t=fill`,
+    // Titles centered in each half
+    `drawtext=text='${cleanStr(leftTitle)}'${font}:fontcolor=0xff6b6b:fontsize=${titleSize}:x='(${half}-text_w)/2':y=${Math.round(h*0.15)}:alpha='if(lt(t,0.3),t/0.3,1)'`,
+    `drawtext=text='${cleanStr(rightTitle)}'${font}:fontcolor=0x22c55e:fontsize=${titleSize}:x='${half}+(${half}-text_w)/2':y=${Math.round(h*0.15)}:alpha='if(lt(t,0.5),0,if(lt(t,0.8),(t-0.5)/0.3,1))'`,
   ];
+  // Left lines
+  leftLines.forEach((line, i) => {
+    const y = Math.round(h * 0.35) + i * Math.round(h * 0.13);
+    const delay = 0.6 + i * 0.25;
+    filters.push(`drawtext=text='${cleanStr(line)}'${font}:fontcolor=0xaaaaaa:fontsize=${lineSize}:x='(${half}-text_w)/2':y=${y}:alpha='if(lt(t,${delay.toFixed(1)}),0,if(lt(t,${(delay+0.3).toFixed(1)}),(t-${delay.toFixed(1)})/0.3,1))'`);
+  });
+  // Right lines
+  rightLines.forEach((line, i) => {
+    const y = Math.round(h * 0.35) + i * Math.round(h * 0.13);
+    const delay = 0.8 + i * 0.25;
+    filters.push(`drawtext=text='${cleanStr(line)}'${font}:fontcolor=white:fontsize=${lineSize}:x='${half}+(${half}-text_w)/2':y=${y}:alpha='if(lt(t,${delay.toFixed(1)}),0,if(lt(t,${(delay+0.3).toFixed(1)}),(t-${delay.toFixed(1)})/0.3,1))'`);
+  });
   try {
+    const silentPath = outputPath + '.silent.mp4';
     await new Promise((resolve, reject) => {
       ffmpeg().input(`color=c=0x111111:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
         .videoFilters(filters)
-        .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
-        .output(outputPath).on("end",resolve).on("error",reject).run();
+        .outputOptions(["-c:v","libx264","-preset","ultrafast","-crf","26","-pix_fmt","yuv420p","-t",String(D)])
+        .output(silentPath).on("end",resolve).on("error",reject).run();
     });
-    const silentS = outputPath.replace('.mp4','_s.mp4');
-    fs.renameSync(outputPath, silentS);
-    await mixMusicAndSend(silentS, outputPath, D, res, 'split-screen.mp4', () => { try{fs.unlinkSync(outputPath);}catch{} });
+    await addMusic(silentPath, outputPath, D);
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=split-screen.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { try{fs.unlinkSync(outputPath);}catch{} });
   } catch(err) { try{fs.unlinkSync(outputPath);}catch{} res.status(500).json({error:err.message}); }
 });
 
-// ─── VIDEO TYPE 4: SUBTITLE/CAPTION STYLE ───
+// ═══════════════════════════════════════════════════════════
+// VIDEO TYPE 4: SUBTITLE STYLE
+// Fix: one line per scene, centered, clean
+// ═══════════════════════════════════════════════════════════
 app.post("/generate-video/subtitle", async (req, res) => {
-  const { lines = ["GoodDeeds Network","All In One Platform","Email SMS WhatsApp","Invoices Social AI","Start Free Today"], format = "square" } = req.body || {};
+  const { lines = ["GoodDeeds Network","All In One Platform","Email SMS WhatsApp","Start Free Today"], format = "square" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
   const lineD = 2.0; const D = lines.length * lineD; const FPS = 24;
   const tmpDir = os.tmpdir(); const ts = Date.now();
-  const sceneFiles = []; const listFile = path.join(tmpDir, `list_${ts}.txt`);
+  const sceneFiles = [];
   const outputPath = path.join(tmpDir, `subtitle_${ts}.mp4`);
-  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
-  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
-  const bgs = ["0x0a0a0a","0x0d1b2a","0x1a0a2e","0x0a1a0a","0x1a1a0a","0x0a0a1a"];
+  const listFile = path.join(tmpDir, `slist_${ts}.txt`);
+  const font = getFont();
+  const bgs = ["0x0a0a0a","0x0d1b2a","0x1a0a2e","0x0a1a0a","0x1a1a0a"];
   try {
     for (let i = 0; i < lines.length; i++) {
       const sceneOut = path.join(tmpDir, `sub_${ts}_${i}.mp4`);
       sceneFiles.push(sceneOut);
-      const safe = cleanStr(lines[i]);
-      const yPos = Math.round(h * 0.72);
+      const text = cleanStr(lines[i]);
+      const yPos = Math.round(h * 0.7);
+      const alpha = `if(lt(t,0.2),t/0.2,if(gt(t,${(lineD-0.2).toFixed(1)}),(${lineD}-t)/0.2,1))`;
       const filters = [
-        `drawbox=x=0:y=${yPos-20}:w=${w}:h=${Math.round(h*0.12)}:color=0x000000@0.7:t=fill`,
-        `drawtext=text='${safe}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.048)}:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.2),t/0.2,if(gt(t,${lineD-0.2}),(${lineD}-t)/0.2,1))'`,
+        `drawbox=x=0:y=${yPos-15}:w=${w}:h=${Math.round(h*0.1)}:color=0x000000@0.7:t=fill`,
+        `drawtext=text='${text}'${font}:fontcolor=white:fontsize=${Math.round(h*0.045)}:x=(w-text_w)/2:y=${yPos}:alpha='${alpha}'`,
       ];
       await new Promise((resolve, reject) => {
         ffmpeg().input(`color=c=${bgs[i%bgs.length]}:size=${w}x${h}:rate=${FPS}:duration=${lineD}`).inputOptions(["-f","lavfi"])
@@ -1170,116 +1213,65 @@ app.post("/generate-video/subtitle", async (req, res) => {
       });
     }
     fs.writeFileSync(listFile, sceneFiles.map(f=>`file '${f}'`).join("\n"));
+    const silentPath = outputPath + '.silent.mp4';
     await new Promise((resolve, reject) => {
       ffmpeg().input(listFile).inputOptions(["-f","concat","-safe","0"])
-        .outputOptions(["-c","copy","-movflags","+faststart"])
-        .output(outputPath).on("end",resolve).on("error",reject).run();
+        .outputOptions(["-c","copy"]).output(silentPath).on("end",resolve).on("error",reject).run();
     });
-    const silentSub = outputPath.replace('.mp4','_s.mp4');
-    fs.renameSync(outputPath, silentSub);
-    const subCleanup = () => { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); };
-    await mixMusicAndSend(silentSub, outputPath, D, res, 'subtitle.mp4', subCleanup);
+    await addMusic(silentPath, outputPath, D);
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=subtitle.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
   } catch(err) { [outputPath,listFile,...sceneFiles].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
 });
 
-// ─── VIDEO TYPE 5: REAL VIDEO BACKGROUND + TEXT OVERLAY ───
-app.post("/generate-video/video-bg", async (req, res) => {
-  const { scenes: customScenes, format = "landscape" } = req.body || {};
-  const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.landscape;
-  const { w, h } = fmt;
-  const D = 3.0; const FPS = 25;
-  const tmpDir = os.tmpdir(); const ts = Date.now();
-  const bgVideoUrl = "https://www.w3schools.com/html/mov_bbb.mp4";
-  const bgPath = path.join(tmpDir, `bg_${ts}.mp4`);
-  const outputPath = path.join(tmpDir, `videobg_${ts}.mp4`);
-  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
-  const fontOpt = fontCandidates.find(f => fs.existsSync(f)) ? `:fontfile=${fontCandidates.find(f => fs.existsSync(f))}` : "";
-  const scenes = customScenes || VIDEO_SCENES;
-  const totalD = scenes.length * D;
-  try {
-    // Download background video
-    const bgRes = await fetch(bgVideoUrl);
-    const bgBuf = await bgRes.arrayBuffer();
-    fs.writeFileSync(bgPath, Buffer.from(bgBuf));
-    console.log(`[VideoBG] Downloaded ${Math.round(bgBuf.byteLength/1024)}KB`);
-    // Build text overlays for all scenes
-    const filters = [
-      // Scale bg to fit, loop it, darken overlay
-      `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},loop=-1:size=${Math.round(totalD*FPS)},trim=0:${totalD},setpts=PTS-STARTPTS`,
-      `drawbox=x=0:y=0:w=${w}:h=${h}:color=0x000000@0.55:t=fill`,
-    ];
-    scenes.forEach((sc, idx) => {
-      const tStart = idx * D;
-      const tEnd = tStart + D;
-      const safe = cleanStr(sc.text);
-      const alpha = `if(lt(t,${tStart}),0,if(lt(t,${(tStart+0.4).toFixed(1)}),(t-${tStart})/0.4,if(gt(t,${(tEnd-0.4).toFixed(1)}),(${tEnd}-t)/0.4,1)))`;
-      filters.push(`drawtext=text='${safe}'${fontOpt}:fontcolor=${sc.fontcolor||"white"}:fontsize=${Math.round((sc.fontsize||60)*fmt.fontScale)}:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${alpha}'`);
-    });
-    await new Promise((resolve, reject) => {
-      ffmpeg().input(bgPath)
-        .videoFilters(filters)
-        .outputOptions(["-c:v","libx264","-preset",(w>1080||h>1080)?"ultrafast":"fast","-crf","23","-pix_fmt","yuv420p","-an","-t",String(totalD)])
-        .output(outputPath).on("end",resolve).on("error",reject).run();
-    });
-    const silentVB = outputPath.replace('.mp4','_s.mp4');
-    fs.renameSync(outputPath, silentVB);
-    const vbCleanup = () => { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); };
-    await mixMusicAndSend(silentVB, outputPath, totalD, res, 'video-bg.mp4', vbCleanup);
-  } catch(err) { [outputPath,bgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
-});
-
-// ─── VIDEO TYPE 6: PRODUCT SHOWCASE ───
+// ═══════════════════════════════════════════════════════════
+// VIDEO TYPE 5: PRODUCT SHOWCASE
+// Fix: proper centering, clean text, no brackets
+// ═══════════════════════════════════════════════════════════
 app.post("/generate-video/product", async (req, res) => {
-  const { productName = "GoodDeeds Business Suite", price = "N15,000 per month", cta = "Start Free Today", imageUrl = "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=800&q=80", format = "square" } = req.body || {};
+  const { productName = "GoodDeeds Business Suite", price = "N15000 per month", cta = "Start Free Today", imageUrl = "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?w=800&q=80", format = "square" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
-  const D = 5.0; const FPS = 25;
+  const D = 5.0; const FPS = 24;
   const tmpDir = os.tmpdir(); const ts = Date.now();
-  const imgPath = path.join(tmpDir, `product_img_${ts}.jpg`);
+  const imgPath = path.join(tmpDir, `pimg_${ts}.jpg`);
   const outputPath = path.join(tmpDir, `product_${ts}.mp4`);
-  const fontCandidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"];
-  const fontFile = fontCandidates.find(f => fs.existsSync(f)) || null;
-  const fontOpt = fontFile ? `:fontfile=${fontFile}` : "";
+  const font = getFont();
   try {
-    // Download product image
     const imgRes = await fetch(imageUrl);
-    const imgBuf = await imgRes.arrayBuffer();
-    fs.writeFileSync(imgPath, Buffer.from(imgBuf));
-    const imgW = Math.round(w * 0.55); const imgH = Math.round(h * 0.5);
-    const imgX = Math.round((w - imgW) / 2); const imgY = Math.round(h * 0.08);
-    const textY = Math.round(h * 0.65);
-    const safeProduct = cleanStr(productName);
-    const safePrice = cleanStr(price);
-    const safeCta = cleanStr(cta);
-    // Build filter: bg + image overlay + text
+    fs.writeFileSync(imgPath, Buffer.from(await imgRes.arrayBuffer()));
+    const imgW = Math.round(w * 0.5); const imgH = Math.round(h * 0.45);
+    const imgX = Math.round((w - imgW) / 2); const imgY = Math.round(h * 0.06);
+    const textY = Math.round(h * 0.58);
     const filterComplex = [
-      // Scale product image
-      `[1:v]scale=${imgW}:${imgH}:force_original_aspect_ratio=decrease,pad=${imgW}:${imgH}:(ow-iw)/2:(oh-ih)/2:color=0x00000000[img]`,
-      // Overlay image on background with fade-in
-      `[0:v][img]overlay=x=${imgX}:y=${imgY}:enable='between(t,0,${D})':alpha=1[v1]`,
-      // Product name
-      `[v1]drawtext=text='${safeProduct}'${fontOpt}:fontcolor=white:fontsize=${Math.round(h*0.055)}:x=(w-text_w)/2:y=${textY}:alpha='if(lt(t,0.5),t/0.5,1)'[v2]`,
-      // Price
-      `[v2]drawtext=text='${safePrice}'${fontOpt}:fontcolor=0x22c55e:fontsize=${Math.round(h*0.065)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.09)}:alpha='if(lt(t,0.8),0,if(lt(t,1.1),(t-0.8)/0.3,1))'[v3]`,
-      // CTA button style
-      `[v3]drawbox=x=(w-${Math.round(w*0.5)})/2:y=${textY+Math.round(h*0.2)}:w=${Math.round(w*0.5)}:h=${Math.round(h*0.08)}:color=0x22c55e:t=fill[v4]`,
-      `[v4]drawtext=text='${safeCta}'${fontOpt}:fontcolor=black:fontsize=${Math.round(h*0.04)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.225)}:alpha='if(lt(t,1.2),0,if(lt(t,1.5),(t-1.2)/0.3,1))'`,
+      `[1:v]scale=${imgW}:${imgH}:force_original_aspect_ratio=decrease,pad=${imgW}:${imgH}:(ow-iw)/2:(oh-ih)/2:color=0x111111[img]`,
+      `[0:v][img]overlay=${imgX}:${imgY}[v1]`,
+      `[v1]drawtext=text='${cleanStr(productName)}'${font}:fontcolor=white:fontsize=${Math.round(h*0.05)}:x=(w-text_w)/2:y=${textY}:alpha='if(lt(t,0.5),t/0.5,1)'[v2]`,
+      `[v2]drawtext=text='${cleanStr(price)}'${font}:fontcolor=0x22c55e:fontsize=${Math.round(h*0.06)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.08)}:alpha='if(lt(t,0.8),0,if(lt(t,1.1),(t-0.8)/0.3,1))'[v3]`,
+      `[v3]drawbox=x=${Math.round(w*0.25)}:y=${textY+Math.round(h*0.18)}:w=${Math.round(w*0.5)}:h=${Math.round(h*0.07)}:color=0x22c55e:t=fill[v4]`,
+      `[v4]drawtext=text='${cleanStr(cta)}'${font}:fontcolor=0x000000:fontsize=${Math.round(h*0.035)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.195)}:alpha='if(lt(t,1.2),0,if(lt(t,1.5),(t-1.2)/0.3,1))'`,
     ];
+    const silentPath = outputPath + '.silent.mp4';
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(`color=c=0x111111:size=${w}x${h}:rate=${FPS}:duration=${D}`)
-        .inputOptions(["-f","lavfi"])
+        .input(`color=c=0x111111:size=${w}x${h}:rate=${FPS}:duration=${D}`).inputOptions(["-f","lavfi"])
         .input(imgPath)
         .complexFilter(filterComplex)
-        .outputOptions(["-c:v","libx264","-preset","fast","-crf","23","-pix_fmt","yuv420p","-t",String(D)])
-        .output(outputPath).on("end",resolve).on("error",reject).run();
+        .outputOptions(["-c:v","libx264","-preset","ultrafast","-crf","26","-pix_fmt","yuv420p","-t",String(D)])
+        .output(silentPath).on("end",resolve).on("error",reject).run();
     });
-    const silentP = outputPath.replace('.mp4','_s.mp4');
-    fs.renameSync(outputPath, silentP);
-    const pCleanup = () => { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); };
-    await mixMusicAndSend(silentP, outputPath, D, res, 'product.mp4', pCleanup);
+    await addMusic(silentPath, outputPath, D);
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition","attachment; filename=product.mp4");
+    const stream = fs.createReadStream(outputPath);
+    stream.pipe(res);
+    stream.on("end", () => { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); });
   } catch(err) { [outputPath,imgPath].forEach(f=>{try{fs.unlinkSync(f);}catch{}}); res.status(500).json({error:err.message}); }
 });
+
 
 process.on("uncaughtException", (err) => console.error("[UNCAUGHT]", err.message));
 process.on("unhandledRejection", (err) => console.error("[UNHANDLED]", err));
