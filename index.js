@@ -749,51 +749,55 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   const { w, h, fontScale, yOffset } = fmt;
   const fs_size = Math.round(sc.fontsize * fontScale);
   const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
-  const fade = 0.35;
-  const escText = cleanStr;
-  const safeText = escText(sc.text);
-  const centerY = yOffset !== 0 ? `(${h}-text_h)/2+${yOffset}` : `(${h}-text_h)/2`;
-  const centerX = `(${w}-text_w)/2`;
+  const fade = 0.4;
+  const safeText = cleanStr(sc.text);
+  const padding = Math.round(w * 0.08); // 8% padding on each side
+  const maxTextW = w - padding * 2;
   const alphaFade = `if(lt(t,${fade}),t/${fade},if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
+
+  // Word wrap: break text into lines that fit within maxTextW
+  const charWidth = fs_size * 0.52; // approximate char width for DejaVu Bold
+  const maxCharsPerLine = Math.floor(maxTextW / charWidth);
+  const words = safeText.split(" ");
+  const lines = [];
+  let currentLine = "";
+  for (const word of words) {
+    if ((currentLine + " " + word).trim().length > maxCharsPerLine && currentLine) {
+      lines.push(currentLine.trim());
+      currentLine = word;
+    } else {
+      currentLine = currentLine ? currentLine + " " + word : word;
+    }
+  }
+  if (currentLine.trim()) lines.push(currentLine.trim());
+
+  // Calculate total text block height
+  const lineHeight = Math.round(fs_size * 1.4);
+  const totalTextH = lines.length * lineHeight;
+  const baseY = Math.round((h - totalTextH) / 2) + (yOffset || 0);
+
+  // Build drawtext filters — one per line, all centered
   let filters = [];
 
   if (sc.animation === "fade_up") {
-    const yExpr = `${centerY}-40*(t/${D})`;
-    filters = [`drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`];
-
-  } else if (sc.animation === "zoom_in") {
-    // Only use pad+crop zoom for square (1080x1080). Larger formats use fade_up to avoid SIGKILL.
-    if (w <= 1080 && h <= 1080) {
-      const pad = Math.round(w * 0.05);
-      filters = [
-        `pad=${w + pad * 2}:${h + pad * 2}:${pad}:${pad}:color=${sc.bg}`,
-        `crop=${w}:${h}:'${pad}*(1-t/${D})':'${pad}*(1-t/${D})'`,
-        `drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${centerY}':alpha='${alphaFade}'`,
-      ];
-    } else {
-      // Fallback for large frames: simple fade_up (no heavy filter)
-      const yExpr = `${centerY}-30*(t/${D})`;
-      filters = [`drawtext=text='${safeText}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x='${centerX}':y='${yExpr}':alpha='${alphaFade}'`];
-    }
-
-  } else if (sc.animation === "word_by_word") {
-    const words = sc.text.split(" ");
-    const wordDelay = Math.min(0.35, (D * 0.6) / words.length);
-    const charW = Math.round(fs_size * 0.55);
-    const spaceW = Math.round(fs_size * 0.3);
-    const wordWidths = words.map(word => word.length * charW);
-    const totalW = wordWidths.reduce((s, ww) => s + ww, 0) + spaceW * (words.length - 1);
-    let xCursor = Math.round((w - totalW) / 2);
-    const wordFilters = words.map((word, idx) => {
-      const sw = escText(word);
-      const startT = (idx * wordDelay).toFixed(2);
-      const endFade = (idx * wordDelay + fade).toFixed(2);
-      const wordAlpha = `if(lt(t,${startT}),0,if(lt(t,${endFade}),(t-${startT})/${fade},if(gt(t,${(D - fade).toFixed(2)}),(${D}-t)/${fade},1)))`;
-      const xPos = xCursor;
-      xCursor += wordWidths[idx] + spaceW;
-      return `drawtext=text='${sw}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=${xPos}:y='${centerY}':alpha='${wordAlpha}'`;
+    filters = lines.map((line, li) => {
+      const y = baseY + li * lineHeight;
+      const yExpr = `${y}-30*(t/${D})`;
+      return `drawtext=text='${line}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=(w-text_w)/2:y='${yExpr}':alpha='${alphaFade}'`;
     });
-    filters = wordFilters;
+  } else if (sc.animation === "zoom_in") {
+    // Simple fade for zoom (actual zoom too heavy)
+    filters = lines.map((line, li) => {
+      const y = baseY + li * lineHeight;
+      const yExpr = `${y}-20*(t/${D})`;
+      return `drawtext=text='${line}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=(w-text_w)/2:y='${yExpr}':alpha='${alphaFade}'`;
+    });
+  } else {
+    // Default: simple centered fade
+    filters = lines.map((line, li) => {
+      const y = baseY + li * lineHeight;
+      return `drawtext=text='${line}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=(w-text_w)/2:y=${y}:alpha='${alphaFade}'`;
+    });
   }
 
   return new Promise((resolve, reject) => {
@@ -809,28 +813,6 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
       .run();
   });
 }
-
-
-// ─── PIXABAY MUSIC FETCH ───
-async function fetchPixabayMusic() {
-  const key = process.env.PIXABAY_API_KEY || "55700466-152b17378ca052da54a0afb72";
-  const queries = ["corporate background", "motivational upbeat", "ambient business"];
-  const q = queries[Math.floor(Math.random() * queries.length)];
-  try {
-    const url = `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(q)}&category=music&per_page=20&safesearch=true`;
-    const res = await fetch(url);
-    const data = await res.json();
-    const hits = (data.hits || []).filter(h => h.webformatURL || h.previewURL);
-    if (!hits.length) return null;
-    const hit = hits[Math.floor(Math.random() * Math.min(hits.length, 10))];
-    // Pixabay music tracks are returned as audio files via previewURL
-    return hit.previewURL || hit.webformatURL || null;
-  } catch (e) {
-    console.log("[Music] Fetch failed:", e.message);
-    return null;
-  }
-}
-
 
 // ─── JAMENDO MUSIC FETCH ───
 async function fetchPixabayMusic() {
