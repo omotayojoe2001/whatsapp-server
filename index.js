@@ -1227,6 +1227,7 @@ app.post("/generate-video/product", async (req, res) => {
   const font = getFont();
   try {
     const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) throw new Error(`Image fetch failed: ${imgRes.status}`);
     fs.writeFileSync(imgPath, Buffer.from(await imgRes.arrayBuffer()));
     const imgW = Math.round(w * 0.5); const imgH = Math.round(h * 0.45);
     const imgX = Math.round((w - imgW) / 2); const imgY = Math.round(h * 0.06);
