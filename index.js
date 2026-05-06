@@ -1231,11 +1231,12 @@ app.post("/generate-video/product", async (req, res) => {
     const imgW = Math.round(w * 0.5); const imgH = Math.round(h * 0.45);
     const imgX = Math.round((w - imgW) / 2); const imgY = Math.round(h * 0.06);
     const textY = Math.round(h * 0.58);
+    const pad = Math.round(w * 0.08);
     const filterComplex = [
       `[1:v]scale=${imgW}:${imgH}:force_original_aspect_ratio=decrease,pad=${imgW}:${imgH}:(ow-iw)/2:(oh-ih)/2:color=0x111111[img]`,
       `[0:v][img]overlay=${imgX}:${imgY}[v1]`,
-      `[v1]drawtext=text='${cleanStr(productName)}'${font}:fontcolor=white:fontsize=${Math.round(h*0.05)}:x=(w-text_w)/2:y=${textY}:alpha='if(lt(t,0.5),t/0.5,1)'[v2]`,
-      `[v2]drawtext=text='${cleanStr(price)}'${font}:fontcolor=0x22c55e:fontsize=${Math.round(h*0.06)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.08)}:alpha='if(lt(t,0.8),0,if(lt(t,1.1),(t-0.8)/0.3,1))'[v3]`,
+      `[v1]drawtext=text='${cleanStr(productName)}'${font}:fontcolor=white:fontsize=${Math.round(h*0.045)}:x='max(${pad},(w-text_w)/2)':y=${textY}:alpha='if(lt(t,0.5),t/0.5,1)'[v2]`,
+      `[v2]drawtext=text='${cleanStr(price)}'${font}:fontcolor=0x22c55e:fontsize=${Math.round(h*0.055)}:x='max(${pad},(w-text_w)/2)':y=${textY+Math.round(h*0.08)}:alpha='if(lt(t,0.8),0,if(lt(t,1.1),(t-0.8)/0.3,1))'[v3]`,
       `[v3]drawbox=x=${Math.round(w*0.25)}:y=${textY+Math.round(h*0.18)}:w=${Math.round(w*0.5)}:h=${Math.round(h*0.07)}:color=0x22c55e:t=fill[v4]`,
       `[v4]drawtext=text='${cleanStr(cta)}'${font}:fontcolor=0x000000:fontsize=${Math.round(h*0.035)}:x=(w-text_w)/2:y=${textY+Math.round(h*0.195)}:alpha='if(lt(t,1.2),0,if(lt(t,1.5),(t-1.2)/0.3,1))'`,
     ];
