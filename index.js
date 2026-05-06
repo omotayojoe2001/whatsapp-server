@@ -817,19 +817,19 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
 // ─── JAMENDO MUSIC FETCH ───
 async function fetchPixabayMusic() {
   const clientId = process.env.JAMENDO_CLIENT_ID || "3ff88d7b";
-  const tags = ["corporate", "upbeat", "motivational", "positive", "energetic"];
+  const tags = ["corporate", "upbeat", "motivational", "positive"];
   const tag = tags[Math.floor(Math.random() * tags.length)];
   try {
-    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&audioformat=mp32&include=musicinfo&boost=popularity_total&speed=medium_high&vocalinstrumental=instrumental`;
+    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&audioformat=mp32&boost=popularity_total`;
     const res = await fetch(url);
     const data = await res.json();
     const tracks = (data.results || []).filter(t => t.audio);
-    if (!tracks.length) return null;
-    const track = tracks[Math.floor(Math.random() * Math.min(tracks.length, 10))];
-    console.log(`[Music] Track: "${track.name}" by ${track.artist_name}`);
+    if (!tracks.length) { console.log("[Music] No tracks for tag:", tag); return null; }
+    const track = tracks[Math.floor(Math.random() * Math.min(tracks.length, 8))];
+    console.log(`[Music] "${track.name}" by ${track.artist_name}`);
     return track.audio;
   } catch (e) {
-    console.log("[Music] Jamendo fetch failed:", e.message);
+    console.log("[Music] Jamendo failed:", e.message);
     return null;
   }
 }
