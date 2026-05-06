@@ -863,7 +863,7 @@ app.post("/generate-video", async (req, res) => {
       const textLen = (scenes[i].text || "").length;
       const D = Math.min(5.0, Math.max(2.5, textLen * 0.04 + 1.5));
       await renderScene(scenes[i], fmt, sceneOut, fontPath, D, FPS);
-      console.log(`[Video] Scene ${i + 1}/${scenes.length} (${D.toFixed(1)}s)`);+ 1}/${scenes.length} (${formatKey}) done`);
+      console.log(`[Video] Scene ${i + 1}/${scenes.length} (${D.toFixed(1)}s)`);
     }
 
     fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f}'`).join("\n"));
