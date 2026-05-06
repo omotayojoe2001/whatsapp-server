@@ -874,11 +874,12 @@ app.post("/generate-video", async (req, res) => {
   const cleanup = () => [outputPath, listFile, ...sceneFiles].forEach(f => { try { fs.unlinkSync(f); } catch {} });
 
   try {
-    for (let i = 0; i < VIDEO_SCENES.length; i++) {
+    const scenes = req.body?.scenes || VIDEO_SCENES;
+    for (let i = 0; i < scenes.length; i++) {
       const sceneOut = path.join(tmpDir, `scene_${ts}_${i}.mp4`);
       sceneFiles.push(sceneOut);
-      await renderScene(VIDEO_SCENES[i], fmt, sceneOut, fontPath, D, FPS);
-      console.log(`[Video] Scene ${i + 1}/${VIDEO_SCENES.length} (${formatKey}) done`);
+      await renderScene(scenes[i], fmt, sceneOut, fontPath, D, FPS);
+      console.log(`[Video] Scene ${i + 1}/${scenes.length} (${formatKey}) done`);
     }
 
     fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f}'`).join("\n"));
