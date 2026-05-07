@@ -745,6 +745,41 @@ const VIDEO_SCENES = [
   { text: "Start Growing Today",            bg: "0x0a1a0a", fontsize: 66, fontcolor: "0x22c55e", animation: "fade_up"   },
 ];
 
+// ─── GRADIENT PRESETS (must match frontend BG_PRESETS) ───
+const GRADIENT_PRESETS = {
+  grad_sunset: ["0x1a0533", "0x4a1942", "0xc84b31"],
+  grad_ocean: ["0x0a1628", "0x1a3a5c", "0x0d4f6e"],
+  grad_neon: ["0x0a0020", "0x1a0040", "0x3d0066"],
+  grad_ember: ["0x1a0a00", "0x3d1a00", "0x662200"],
+  grad_aurora: ["0x001a1a", "0x003333", "0x004d40"],
+  grad_cosmic: ["0x0a0015", "0x1a0033", "0x0d1a3d"],
+  grad_lava: ["0x1a0000", "0x330a00", "0x4d1a00"],
+  grad_ice: ["0x0a1a2e", "0x1a2e4a", "0x2e4a6e"],
+  grad_mint: ["0x001a0d", "0x003320", "0x004d33"],
+  grad_royal: ["0x0d0033", "0x1a0066", "0x330099"],
+};
+
+function buildBgInput(bg, w, h, FPS, D) {
+  // Gradient backgrounds use drawbox overlays on a base color
+  if (bg.startsWith("grad_") && GRADIENT_PRESETS[bg]) {
+    const colors = GRADIENT_PRESETS[bg];
+    return {
+      input: `color=c=${colors[0]}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
+      inputOptions: ["-f", "lavfi"],
+      extraFilters: [
+        `drawbox=x=0:y=0:w=${w}:h=${Math.round(h*0.33)}:color=${colors[2]}:t=fill`,
+        `drawbox=x=0:y=${Math.round(h*0.33)}:w=${w}:h=${Math.round(h*0.34)}:color=${colors[1]}:t=fill`,
+      ],
+    };
+  }
+  // Solid color
+  return {
+    input: `color=c=${bg}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
+    inputOptions: ["-f", "lavfi"],
+    extraFilters: [],
+  };
+}
+
 async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   const { w, h, fontScale, yOffset } = fmt;
   const fs_size = Math.round(sc.fontsize * fontScale);
@@ -801,10 +836,12 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   }
 
   return new Promise((resolve, reject) => {
+    const bgInfo = buildBgInput(sc.bg, w, h, FPS, D);
+    const allFilters = [...bgInfo.extraFilters, ...filters];
     ffmpeg()
-      .input(`color=c=${sc.bg}:size=${w}x${h}:rate=${FPS}:duration=${D}`)
-      .inputOptions(["-f", "lavfi"])
-      .videoFilters(filters)
+      .input(bgInfo.input)
+      .inputOptions(bgInfo.inputOptions)
+      .videoFilters(allFilters)
       .outputOptions(["-c:v", "libx264", "-preset", (w > 1080 || h > 1080) ? "ultrafast" : "fast", "-crf", "26", "-pix_fmt", "yuv420p", "-t", String(D)])
       .output(sceneOut)
       .on("stderr", line => { if (line.includes("Error")) console.log("[FFmpeg]", line); })
