@@ -759,19 +759,83 @@ const GRADIENT_PRESETS = {
   grad_royal: ["0x0d0033", "0x1a0066", "0x330099"],
 };
 
-function buildBgInput(bg, w, h, FPS, D) {
-  // Gradient backgrounds use drawbox overlays on a base color
+// ─── GRADIENT PRESETS (must match frontend BG_PRESETS) ───
+const GRADIENT_PRESETS = {
+  grad_sunset: ["0x1a0533", "0x4a1942", "0xc84b31"],
+  grad_ocean: ["0x0a1628", "0x1a3a5c", "0x0d4f6e"],
+  grad_neon: ["0x0a0020", "0x1a0040", "0x3d0066"],
+  grad_ember: ["0x1a0a00", "0x3d1a00", "0x662200"],
+  grad_aurora: ["0x001a1a", "0x003333", "0x004d40"],
+  grad_cosmic: ["0x0a0015", "0x1a0033", "0x0d1a3d"],
+  grad_lava: ["0x1a0000", "0x330a00", "0x4d1a00"],
+  grad_ice: ["0x0a1a2e", "0x1a2e4a", "0x2e4a6e"],
+  grad_mint: ["0x001a0d", "0x003320", "0x004d33"],
+  grad_royal: ["0x0d0033", "0x1a0066", "0x330099"],
+};
+
+// Background style types:
+// "bands" = 3 horizontal color bands (current)
+// "smooth" = smooth vertical gradient using geq filter
+// "geometric" = base color + diagonal lines/shapes via drawbox
+// "vignette" = solid center with dark edges
+// "image" = user-provided image stretched to fill
+function buildBgInput(bg, w, h, FPS, D, bgStyle) {
+  const style = bgStyle || "smooth";
+
   if (bg.startsWith("grad_") && GRADIENT_PRESETS[bg]) {
     const colors = GRADIENT_PRESETS[bg];
-    return {
-      input: `color=c=${colors[0]}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
-      inputOptions: ["-f", "lavfi"],
-      extraFilters: [
-        `drawbox=x=0:y=0:w=${w}:h=${Math.round(h*0.33)}:color=${colors[2]}:t=fill`,
-        `drawbox=x=0:y=${Math.round(h*0.33)}:w=${w}:h=${Math.round(h*0.34)}:color=${colors[1]}:t=fill`,
-      ],
-    };
+    const c0 = colors[0]; // bottom
+    const c1 = colors[1]; // middle
+    const c2 = colors[2]; // top
+
+    if (style === "bands") {
+      // 3 horizontal bands
+      return {
+        input: `color=c=${c0}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
+        inputOptions: ["-f", "lavfi"],
+        extraFilters: [
+          `drawbox=x=0:y=0:w=${w}:h=${Math.round(h*0.33)}:color=${c2}:t=fill`,
+          `drawbox=x=0:y=${Math.round(h*0.33)}:w=${w}:h=${Math.round(h*0.34)}:color=${c1}:t=fill`,
+        ],
+      };
+    } else if (style === "geometric") {
+      // Base color + diagonal accent shapes
+      const extraFilters = [
+        `drawbox=x=0:y=0:w=${w}:h=${h}:color=${c0}:t=fill`,
+        // Diagonal accent bars
+        `drawbox=x=${Math.round(w*0.7)}:y=0:w=${Math.round(w*0.15)}:h=${h}:color=${c1}@0.3:t=fill`,
+        `drawbox=x=0:y=${Math.round(h*0.75)}:w=${w}:h=${Math.round(h*0.08)}:color=${c2}@0.2:t=fill`,
+        `drawbox=x=0:y=0:w=${Math.round(w*0.04)}:h=${h}:color=${c2}@0.4:t=fill`,
+        // Corner accent
+        `drawbox=x=${w-Math.round(w*0.2)}:y=${h-Math.round(h*0.2)}:w=${Math.round(w*0.2)}:h=${Math.round(h*0.2)}:color=${c1}@0.15:t=fill`,
+      ];
+      return {
+        input: `color=c=${c0}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
+        inputOptions: ["-f", "lavfi"],
+        extraFilters,
+      };
+    } else if (style === "vignette") {
+      // Center color with dark edges via vignette filter
+      return {
+        input: `color=c=${c1}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
+        inputOptions: ["-f", "lavfi"],
+        extraFilters: ["vignette=PI/3"],
+      };
+    } else {
+      // "smooth" - vertical gradient using geq (pixel-level blend)
+      // Parse hex colors to RGB for geq
+      const r0 = parseInt(c0.slice(2,4), 16), g0 = parseInt(c0.slice(4,6), 16), b0 = parseInt(c0.slice(6,8), 16);
+      const r2 = parseInt(c2.slice(2,4), 16), g2 = parseInt(c2.slice(4,6), 16), b2 = parseInt(c2.slice(6,8), 16);
+      return {
+        input: `color=c=${c0}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
+        inputOptions: ["-f", "lavfi"],
+        extraFilters: [
+          `geq=r='${r0}+(${r2}-${r0})*Y/${h}':g='${g0}+(${g2}-${g0})*Y/${h}':b='${b0}+(${b2}-${b0})*Y/${h}'`,
+        ],
+      };
+    }
   }
+
   // Solid color
   return {
     input: `color=c=${bg}:size=${w}x${h}:rate=${FPS}:duration=${D}`,
@@ -784,14 +848,15 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   const { w, h, fontScale, yOffset } = fmt;
   const fs_size = Math.round(sc.fontsize * fontScale);
   const fontOpt = fontPath ? `:fontfile=${fontPath}` : "";
-  const fade = 0.4;
+  const fade = 0.3;
   const safeText = cleanStr(sc.text);
-  const padding = Math.round(w * 0.08); // 8% padding on each side
+  const padding = Math.round(w * 0.08);
   const maxTextW = w - padding * 2;
-  const alphaFade = `if(lt(t,${fade}),t/${fade},if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
+  // Fade: quick fade in at start, fade out at end. Text visible from frame 1.
+  const alphaFade = `if(lt(t,${fade}),0.3+0.7*(t/${fade}),if(gt(t,${D - fade}),(${D}-t)/${fade},1))`;
 
-  // Word wrap: break text into lines that fit within maxTextW
-  const charWidth = fs_size * 0.52; // approximate char width for DejaVu Bold
+  // Word wrap
+  const charWidth = fs_size * 0.52;
   const maxCharsPerLine = Math.floor(maxTextW / charWidth);
   const words = safeText.split(" ");
   const lines = [];
@@ -811,24 +876,25 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   const totalTextH = lines.length * lineHeight;
   const baseY = Math.max(padding, Math.round((h - totalTextH) / 2) + (yOffset || 0));
 
-  // Build drawtext filters — one per line, all centered
+  // Build drawtext filters — one per line
+  // Animation is subtle: small drift upward, but text starts VISIBLE (alpha 0.3 at t=0)
   let filters = [];
 
   if (sc.animation === "fade_up") {
     filters = lines.map((line, li) => {
       const y = baseY + li * lineHeight;
-      const yExpr = `${y}-30*(t/${D})`;
+      // Gentle drift: only 15px over full duration, starts at y+8
+      const yExpr = `${y + 8}-15*(t/${D})`;
       return `drawtext=text='${line}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=(w-text_w)/2:y='${yExpr}':alpha='${alphaFade}'`;
     });
   } else if (sc.animation === "zoom_in") {
-    // Simple fade for zoom (actual zoom too heavy)
     filters = lines.map((line, li) => {
       const y = baseY + li * lineHeight;
-      const yExpr = `${y}-20*(t/${D})`;
+      const yExpr = `${y + 5}-10*(t/${D})`;
       return `drawtext=text='${line}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=(w-text_w)/2:y='${yExpr}':alpha='${alphaFade}'`;
     });
   } else {
-    // Default: simple centered fade
+    // Default: static centered with fade
     filters = lines.map((line, li) => {
       const y = baseY + li * lineHeight;
       return `drawtext=text='${line}'${fontOpt}:fontcolor=${sc.fontcolor}:fontsize=${fs_size}:x=(w-text_w)/2:y=${y}:alpha='${alphaFade}'`;
@@ -836,7 +902,7 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   }
 
   return new Promise((resolve, reject) => {
-    const bgInfo = buildBgInput(sc.bg, w, h, FPS, D);
+    const bgInfo = buildBgInput(sc.bg, w, h, FPS, D, sc.bgStyle || "smooth");
     const allFilters = [...bgInfo.extraFilters, ...filters];
     ffmpeg()
       .input(bgInfo.input)
