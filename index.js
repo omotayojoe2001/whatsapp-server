@@ -774,7 +774,7 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
   // Calculate total text block height
   const lineHeight = Math.round(fs_size * 1.4);
   const totalTextH = lines.length * lineHeight;
-  const baseY = Math.round((h - totalTextH) / 2) + (yOffset || 0);
+  const baseY = Math.max(padding, Math.round((h - totalTextH) / 2) + (yOffset || 0));
 
   // Build drawtext filters — one per line, all centered
   let filters = [];
