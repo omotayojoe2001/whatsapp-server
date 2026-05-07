@@ -746,19 +746,6 @@ const VIDEO_SCENES = [
 ];
 
 // ─── GRADIENT PRESETS (must match frontend BG_PRESETS) ───
-const GRADIENT_PRESETS = {
-  grad_sunset: ["0x1a0533", "0x4a1942", "0xc84b31"],
-  grad_ocean: ["0x0a1628", "0x1a3a5c", "0x0d4f6e"],
-  grad_neon: ["0x0a0020", "0x1a0040", "0x3d0066"],
-  grad_ember: ["0x1a0a00", "0x3d1a00", "0x662200"],
-  grad_aurora: ["0x001a1a", "0x003333", "0x004d40"],
-  grad_cosmic: ["0x0a0015", "0x1a0033", "0x0d1a3d"],
-  grad_lava: ["0x1a0000", "0x330a00", "0x4d1a00"],
-  grad_ice: ["0x0a1a2e", "0x1a2e4a", "0x2e4a6e"],
-  grad_mint: ["0x001a0d", "0x003320", "0x004d33"],
-  grad_royal: ["0x0d0033", "0x1a0066", "0x330099"],
-};
-
 // ─── GRADIENT PRESETS (must match frontend BG_PRESETS) ───
 const GRADIENT_PRESETS = {
   grad_sunset: ["0x1a0533", "0x4a1942", "0xc84b31"],
