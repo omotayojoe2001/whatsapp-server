@@ -946,12 +946,18 @@ app.post("/generate-video", async (req, res) => {
 
   try {
     const scenes = req.body?.scenes || VIDEO_SCENES;
+    const targetDuration = req.body?.targetDuration || 0;
     for (let i = 0; i < scenes.length; i++) {
       const sceneOut = path.join(tmpDir, `scene_${ts}_${i}.mp4`);
       sceneFiles.push(sceneOut);
-      // Smart duration: longer text = more time. Min 2.5s, max 5s
-      const textLen = (scenes[i].text || "").length;
-      const D = Math.min(5.0, Math.max(2.5, textLen * 0.04 + 1.5));
+      // Smart duration: if targetDuration set, distribute evenly; otherwise auto
+      let D;
+      if (targetDuration > 0) {
+        D = Math.min(30 / scenes.length, targetDuration / scenes.length);
+      } else {
+        const textLen = (scenes[i].text || "").length;
+        D = Math.min(5.0, Math.max(2.5, textLen * 0.04 + 1.5));
+      }
       await renderScene(scenes[i], fmt, sceneOut, fontPath, D, FPS);
       console.log(`[Video] Scene ${i + 1}/${scenes.length} (${D.toFixed(1)}s)`);
     }
@@ -972,7 +978,9 @@ app.post("/generate-video", async (req, res) => {
     });
 
     // Step 2: Fetch background music from Pixabay
-    const totalDuration = scenes.reduce((sum, sc) => sum + Math.min(5.0, Math.max(2.5, (sc.text || "").length * 0.04 + 1.5)), 0);
+    const totalDuration = targetDuration > 0
+      ? targetDuration
+      : scenes.reduce((sum, sc) => sum + Math.min(5.0, Math.max(2.5, (sc.text || "").length * 0.04 + 1.5)), 0);
     const musicUrl = await fetchPixabayMusic();
     console.log("[Music] URL:", musicUrl || "none");
 
