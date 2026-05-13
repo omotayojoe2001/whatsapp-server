@@ -1055,7 +1055,9 @@ app.post("/generate-video", async (req, res) => {
 // ─── TEXT CLEANER ───
 function cleanStr(t) {
   return String(t)
-    .replace(/[\\[\]\\\\:'"{}|<>]/g, ' ')
+    .replace(/[\[\]\\"{}|<>]/g, ' ')
+    .replace(/'/g, "\u2019")
+    .replace(/:/g, ' -')
     .replace(/\s+/g, ' ')
     .trim();
 }
