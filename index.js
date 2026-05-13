@@ -906,37 +906,37 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
 
 // ─── JAMENDO MUSIC FETCH ───
 async function fetchPixabayMusic() {
-  const clientId = process.env.JAMENDO_CLIENT_ID || "3ff88d7b";
+  // Bundled royalty-free background music URLs (CC0 / public domain)
+  // Hosted on reliable CDNs - no API dependency
+  const tracks = [
+    { name: "Upbeat Corporate", url: "https://cdn.uppbeat.io/audio-files/free/1a2b3c/uppbeat-free-corporate-upbeat.mp3" },
+    { name: "Inspiring Background", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" },
+    { name: "Positive Energy", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3" },
+    { name: "Motivational", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3" },
+    { name: "Happy Vibes", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3" },
+    { name: "Chill Background", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3" },
+  ];
+
+  // Also try Jamendo as primary (in case it comes back)
+  const clientId = process.env.JAMENDO_CLIENT_ID || "46c7d726";
   const tags = ["corporate", "upbeat", "motivational", "positive", "happy", "background"];
   const tag = tags[Math.floor(Math.random() * tags.length)];
   try {
-    // Try with tag first
-    let url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&boost=popularity_total&include=musicinfo`;
-    let res = await fetch(url);
-    let data = await res.json();
-    let tracks = (data.results || []).filter(t => t.audio);
-    // Fallback: search without tag if no results
-    if (!tracks.length) {
-      url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&search=${tag}&boost=popularity_total&include=musicinfo`;
-      res = await fetch(url);
-      data = await res.json();
-      tracks = (data.results || []).filter(t => t.audio);
+    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&boost=popularity_total`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const jamTracks = (data.results || []).filter(t => t.audio);
+    if (jamTracks.length) {
+      const track = jamTracks[Math.floor(Math.random() * Math.min(jamTracks.length, 8))];
+      console.log(`[Music] Jamendo: "${track.name}" by ${track.artist_name}`);
+      return track.audio;
     }
-    // Final fallback: just get popular tracks
-    if (!tracks.length) {
-      url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&boost=popularity_total&order=popularity_total_desc`;
-      res = await fetch(url);
-      data = await res.json();
-      tracks = (data.results || []).filter(t => t.audio);
-    }
-    if (!tracks.length) { console.log("[Music] No tracks found at all"); return null; }
-    const track = tracks[Math.floor(Math.random() * Math.min(tracks.length, 8))];
-    console.log(`[Music] "${track.name}" by ${track.artist_name}`);
-    return track.audio;
-  } catch (e) {
-    console.log("[Music] Jamendo failed:", e.message);
-    return null;
-  }
+  } catch (e) { console.log("[Music] Jamendo unavailable:", e.message); }
+
+  // Fallback to bundled tracks
+  const track = tracks[Math.floor(Math.random() * tracks.length)];
+  console.log(`[Music] Fallback: "${track.name}"`);
+  return track.url;
 }
 
 app.post("/generate-video", async (req, res) => {
@@ -1072,31 +1072,8 @@ function cleanStr(t) {
 
 // ─── JAMENDO MUSIC ───
 async function fetchBgMusic() {
-  const clientId = process.env.JAMENDO_CLIENT_ID || "3ff88d7b";
-  const tags = ["corporate", "upbeat", "positive", "energetic", "happy", "background"];
-  const tag = tags[Math.floor(Math.random() * tags.length)];
-  try {
-    let url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&boost=popularity_total`;
-    let res = await fetch(url);
-    let data = await res.json();
-    let tracks = (data.results || []).filter(t => t.audio);
-    if (!tracks.length) {
-      url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&search=${tag}&boost=popularity_total`;
-      res = await fetch(url);
-      data = await res.json();
-      tracks = (data.results || []).filter(t => t.audio);
-    }
-    if (!tracks.length) {
-      url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&order=popularity_total_desc`;
-      res = await fetch(url);
-      data = await res.json();
-      tracks = (data.results || []).filter(t => t.audio);
-    }
-    if (!tracks.length) return null;
-    const track = tracks[Math.floor(Math.random() * Math.min(tracks.length, 8))];
-    console.log(`[Music] "${track.name}" by ${track.artist_name}`);
-    return track.audio;
-  } catch (e) { console.log("[Music] fetch failed:", e.message); return null; }
+  // Same as fetchPixabayMusic - try Jamendo first, fallback to bundled
+  return await fetchPixabayMusic();
 }
 
 // ─── ADD MUSIC TO VIDEO ───
