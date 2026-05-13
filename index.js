@@ -906,37 +906,27 @@ async function renderScene(sc, fmt, sceneOut, fontPath, D, FPS) {
 
 // ─── JAMENDO MUSIC FETCH ───
 async function fetchPixabayMusic() {
-  // Bundled royalty-free background music URLs (CC0 / public domain)
-  // Hosted on reliable CDNs - no API dependency
-  const tracks = [
-    { name: "Upbeat Corporate", url: "https://cdn.uppbeat.io/audio-files/free/1a2b3c/uppbeat-free-corporate-upbeat.mp3" },
-    { name: "Inspiring Background", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" },
-    { name: "Positive Energy", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3" },
-    { name: "Motivational", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3" },
-    { name: "Happy Vibes", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3" },
-    { name: "Chill Background", url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3" },
-  ];
-
-  // Also try Jamendo as primary (in case it comes back)
+  // Try Jamendo first (in case it comes back)
   const clientId = process.env.JAMENDO_CLIENT_ID || "46c7d726";
-  const tags = ["corporate", "upbeat", "motivational", "positive", "happy", "background"];
+  const tags = ["corporate", "upbeat", "motivational", "positive", "happy", "background", "energetic", "inspiring", "chill", "electronic", "pop", "acoustic"];
   const tag = tags[Math.floor(Math.random() * tags.length)];
   try {
-    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=20&tags=${tag}&boost=popularity_total`;
+    const url = `https://api.jamendo.com/v3.0/tracks/?client_id=${clientId}&format=json&limit=50&tags=${tag}&boost=popularity_total`;
     const res = await fetch(url);
     const data = await res.json();
     const jamTracks = (data.results || []).filter(t => t.audio);
     if (jamTracks.length) {
-      const track = jamTracks[Math.floor(Math.random() * Math.min(jamTracks.length, 8))];
+      const track = jamTracks[Math.floor(Math.random() * jamTracks.length)];
       console.log(`[Music] Jamendo: "${track.name}" by ${track.artist_name}`);
       return track.audio;
     }
   } catch (e) { console.log("[Music] Jamendo unavailable:", e.message); }
 
-  // Fallback to bundled tracks
-  const track = tracks[Math.floor(Math.random() * tracks.length)];
-  console.log(`[Music] Fallback: "${track.name}"`);
-  return track.url;
+  // Fallback: SoundHelix has 17 unique songs
+  const songNum = Math.floor(Math.random() * 17) + 1;
+  const url = `https://www.soundhelix.com/examples/mp3/SoundHelix-Song-${songNum}.mp3`;
+  console.log(`[Music] Fallback: SoundHelix-Song-${songNum}`);
+  return url;
 }
 
 app.post("/generate-video", async (req, res) => {
@@ -1116,7 +1106,7 @@ app.post("/generate-video/kinetic", async (req, res) => {
   const { text = "GoodDeeds All In One", format = "square" } = req.body || {};
   const fmt = VIDEO_FORMATS[format] || VIDEO_FORMATS.square;
   const { w, h } = fmt;
-  const words = text.split(" ");
+  const words = text.split(" ").slice(0, 15); // Max 15 words to avoid timeout
   const wordDur = 0.8;
   const D = words.length * wordDur;
   const FPS = 24;
